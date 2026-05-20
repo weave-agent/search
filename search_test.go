@@ -101,6 +101,21 @@ func TestCleanDuckDuckGoURL(t *testing.T) {
 			input:    "//duckduckgo.com/l/?uddg=file%3A%2F%2F%2Fetc%2Fpasswd",
 			expected: "//duckduckgo.com/l/?uddg=file%3A%2F%2F%2Fetc%2Fpasswd",
 		},
+		{
+			name:     "uddg after other query param",
+			input:    "//duckduckgo.com/l/?q=something&uddg=https%3A%2F%2Fexample.com",
+			expected: "https://example.com",
+		},
+		{
+			name:     "relative redirect path",
+			input:    "/l/?uddg=https%3A%2F%2Fexample.com",
+			expected: "https://example.com",
+		},
+		{
+			name:     "encoded path bytes preserved after single decode",
+			input:    "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpath%252F",
+			expected: "https://example.com/path%2F",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1162,80 +1177,83 @@ func TestRandomUserAgent(t *testing.T) {
 }
 
 func TestMaybeDelaySearch(t *testing.T) {
-	tool := &searchTool{}
-	tool.lastSearchMu.Lock()
-	tool.lastSearchTime = time.Time{}
-	tool.lastSearchMu.Unlock()
+	lastSearchMu.Lock()
+	lastSearchTime = time.Time{}
+	lastSearchMu.Unlock()
 
-	err := tool.maybeDelaySearch(context.Background())
+	err := (&searchTool{}).maybeDelaySearch(context.Background())
 	require.NoError(t, err)
-	assert.False(t, tool.lastSearchTime.IsZero())
+	lastSearchMu.Lock()
+	assert.False(t, lastSearchTime.IsZero())
+	lastSearchMu.Unlock()
 }
 
 func TestMaybeDelaySearch_RateLimits(t *testing.T) {
-	tool := &searchTool{}
-	tool.lastSearchMu.Lock()
-	tool.lastSearchTime = time.Now()
-	tool.lastSearchMu.Unlock()
+	lastSearchMu.Lock()
+	lastSearchTime = time.Now()
+	lastSearchMu.Unlock()
 
 	// Verify delay executes and updates lastSearchTime without asserting wall-clock duration
-	err := tool.maybeDelaySearch(context.Background())
+	err := (&searchTool{}).maybeDelaySearch(context.Background())
 	require.NoError(t, err)
-	assert.False(t, tool.lastSearchTime.IsZero())
+	lastSearchMu.Lock()
+	assert.False(t, lastSearchTime.IsZero())
+	lastSearchMu.Unlock()
 }
 
 func TestMaybeDelaySearch_RespectsMinGap(t *testing.T) {
-	tool := &searchTool{}
-	tool.lastSearchMu.Lock()
-	tool.lastSearchTime = time.Time{}
-	tool.lastSearchMu.Unlock()
+	lastSearchMu.Lock()
+	lastSearchTime = time.Time{}
+	lastSearchMu.Unlock()
 
-	err := tool.maybeDelaySearch(context.Background())
+	err := (&searchTool{}).maybeDelaySearch(context.Background())
 	require.NoError(t, err)
-	firstTime := tool.lastSearchTime
+	lastSearchMu.Lock()
+	firstTime := lastSearchTime
+	lastSearchMu.Unlock()
 
-	err = tool.maybeDelaySearch(context.Background())
+	err = (&searchTool{}).maybeDelaySearch(context.Background())
 	require.NoError(t, err)
-	secondTime := tool.lastSearchTime
+	lastSearchMu.Lock()
+	secondTime := lastSearchTime
+	lastSearchMu.Unlock()
 
 	assert.True(t, secondTime.After(firstTime) || secondTime.Equal(firstTime))
 }
 
 func TestMaybeDelaySearch_Concurrent(t *testing.T) {
-	tool := &searchTool{}
-	tool.lastSearchMu.Lock()
-	tool.lastSearchTime = time.Time{}
-	tool.lastSearchMu.Unlock()
+	lastSearchMu.Lock()
+	lastSearchTime = time.Time{}
+	lastSearchMu.Unlock()
 
 	var wg sync.WaitGroup
 	for range 5 {
 		wg.Go(func() {
-			_ = tool.maybeDelaySearch(context.Background())
+			_ = (&searchTool{}).maybeDelaySearch(context.Background())
 		})
 	}
 	wg.Wait()
 
-	tool.lastSearchMu.Lock()
-	assert.False(t, tool.lastSearchTime.IsZero())
-	tool.lastSearchMu.Unlock()
+	lastSearchMu.Lock()
+	assert.False(t, lastSearchTime.IsZero())
+	lastSearchMu.Unlock()
 }
 
 func TestMaybeDelaySearch_ContextCancellation(t *testing.T) {
-	tool := &searchTool{}
-	tool.lastSearchMu.Lock()
-	tool.lastSearchTime = time.Now()
-	originalTime := tool.lastSearchTime
-	tool.lastSearchMu.Unlock()
+	lastSearchMu.Lock()
+	lastSearchTime = time.Now()
+	originalTime := lastSearchTime
+	lastSearchMu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	err := tool.maybeDelaySearch(ctx)
+	err := (&searchTool{}).maybeDelaySearch(ctx)
 	require.ErrorIs(t, err, context.Canceled)
 
-	tool.lastSearchMu.Lock()
-	finalTime := tool.lastSearchTime
-	tool.lastSearchMu.Unlock()
+	lastSearchMu.Lock()
+	finalTime := lastSearchTime
+	lastSearchMu.Unlock()
 	// lastSearchTime should NOT be updated when cancelled during delay
 	assert.Equal(t, originalTime, finalTime)
 }

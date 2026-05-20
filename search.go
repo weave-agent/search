@@ -23,6 +23,11 @@ const (
 	maxBodySize     = 10 * 1024 * 1024 // 10 MB
 )
 
+var (
+	lastSearchMu   sync.Mutex
+	lastSearchTime time.Time
+)
+
 // SearchConfig holds per-tool settings for the search tool.
 type SearchConfig struct {
 	MaxResults int `json:"max_results" default:"10" env:"MAX_RESULTS"`
@@ -40,8 +45,6 @@ type SearchResult struct {
 type searchTool struct {
 	defaultMaxResults int
 	httpClient        *http.Client
-	lastSearchMu      sync.Mutex
-	lastSearchTime    time.Time
 }
 
 //nolint:gochecknoinits // SDK pattern requires init() for tool registration.
@@ -165,16 +168,16 @@ func (t *searchTool) Execute(ctx context.Context, args map[string]any) (sdk.Tool
 
 func (t *searchTool) maybeDelaySearch(ctx context.Context) error {
 	for {
-		t.lastSearchMu.Lock()
+		lastSearchMu.Lock()
 		minGap := time.Duration(500+rand.IntN(1500)) * time.Millisecond
-		elapsed := time.Since(t.lastSearchTime)
+		elapsed := time.Since(lastSearchTime)
 		if elapsed >= minGap {
-			t.lastSearchTime = time.Now()
-			t.lastSearchMu.Unlock()
+			lastSearchTime = time.Now()
+			lastSearchMu.Unlock()
 			return nil
 		}
 		remaining := minGap - elapsed
-		t.lastSearchMu.Unlock()
+		lastSearchMu.Unlock()
 
 		select {
 		case <-time.After(remaining):
@@ -201,10 +204,7 @@ func (t *searchTool) searchDuckDuckGo(ctx context.Context, query string, maxResu
 	if err != nil {
 		return nil, fmt.Errorf("http request: %w", err)
 	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-	}()
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
@@ -318,12 +318,14 @@ func extractText(n *html.Node) string {
 }
 
 func cleanDuckDuckGoURL(rawURL string) string {
-	if !strings.Contains(rawURL, "duckduckgo.com/l/?uddg=") {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
 		return rawURL
 	}
 
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
+	isDDG := (parsed.Host == "duckduckgo.com" || strings.HasSuffix(parsed.Host, ".duckduckgo.com")) && parsed.Path == "/l/"
+	isRelative := parsed.Host == "" && parsed.Path == "/l/"
+	if !isDDG && !isRelative {
 		return rawURL
 	}
 
@@ -332,15 +334,10 @@ func cleanDuckDuckGoURL(rawURL string) string {
 		return rawURL
 	}
 
-	decoded, err := url.QueryUnescape(uddg)
-	if err != nil {
-		return rawURL
-	}
-
-	u, err := url.Parse(decoded)
+	u, err := url.Parse(uddg)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return rawURL
 	}
 
-	return decoded
+	return uddg
 }
