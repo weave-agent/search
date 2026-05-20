@@ -392,13 +392,13 @@ func TestMaybeDelaySearch_RateLimits(t *testing.T) {
 	start := time.Now()
 	maybeDelaySearch()
 	firstDelay := time.Since(start)
-	assert.True(t, firstDelay >= 400*time.Millisecond, "expected delay of at least 400ms, got %v", firstDelay)
+	assert.GreaterOrEqual(t, firstDelay, 400*time.Millisecond, "expected delay of at least 400ms, got %v", firstDelay)
 
 	// Second call immediately after should also wait
 	start = time.Now()
 	maybeDelaySearch()
 	secondDelay := time.Since(start)
-	assert.True(t, secondDelay >= 400*time.Millisecond, "expected delay of at least 400ms, got %v", secondDelay)
+	assert.GreaterOrEqual(t, secondDelay, 400*time.Millisecond, "expected delay of at least 400ms, got %v", secondDelay)
 }
 
 func TestCleanDuckDuckGoURL_MissingUddg(t *testing.T) {
@@ -433,8 +433,8 @@ func TestParseLiteSearchResults_SnippetWithoutLink(t *testing.T) {
 	results := parseLiteSearchResults(doc, 10)
 	require.Len(t, results, 1)
 	assert.Equal(t, 1, results[0].Position)
-	assert.Equal(t, "", results[0].Title)
-	assert.Equal(t, "", results[0].Link)
+	assert.Empty(t, results[0].Title)
+	assert.Empty(t, results[0].Link)
 	assert.Equal(t, "Orphan snippet.", results[0].Snippet)
 }
 
@@ -501,7 +501,7 @@ func TestGetAttr_Missing(t *testing.T) {
 	require.NotNil(t, divNode)
 
 	assert.Equal(t, "foo", getAttr(divNode, "class"))
-	assert.Equal(t, "", getAttr(divNode, "id"))
+	assert.Empty(t, getAttr(divNode, "id"))
 }
 
 func TestSearchTool_Execute_QueryTypeValidation(t *testing.T) {
@@ -653,7 +653,7 @@ func TestSearchTool_Execute_ResultsFormatting(t *testing.T) {
 	assert.Contains(t, result.Content, "https://example.com")
 	assert.Contains(t, result.Content, "A longer snippet")
 	// Check formatting has newlines
-	assert.True(t, strings.Contains(result.Content, "\n"))
+	assert.Contains(t, result.Content, "\n")
 }
 
 // httpRoundTripperFunc allows using a function as RoundTripper.
@@ -719,7 +719,7 @@ func TestSearchTool_ZeroConfigUsesDefaults(t *testing.T) {
 
 func TestCleanDuckDuckGoURL_EmptyString(t *testing.T) {
 	got := cleanDuckDuckGoURL("")
-	assert.Equal(t, "", got)
+	assert.Empty(t, got)
 }
 
 func TestCleanDuckDuckGoURL_PartialDDG(t *testing.T) {
@@ -962,7 +962,7 @@ func TestSearchResult_OutputFormatting(t *testing.T) {
 		{Title: "Second", Link: "https://second.com", Snippet: "Second snippet", Position: 2},
 	}
 
-	var lines []string
+	lines := make([]string, 0, len(results))
 	for _, r := range results {
 		lines = append(lines, fmt.Sprintf("%d. %s\n   %s\n   %s", r.Position, r.Title, r.Link, r.Snippet))
 	}

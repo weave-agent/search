@@ -3,7 +3,7 @@ package search
 import (
 	"context"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strings"
@@ -45,6 +45,7 @@ var (
 	lastSearchTime time.Time
 )
 
+//nolint:gochecknoinits // SDK pattern requires init() for tool registration.
 func init() {
 	sdk.RegisterTool("search", func(_ sdk.Config, _ sdk.PreferenceReader, cfg SearchConfig) (sdk.Tool, error) {
 		maxResults := cfg.MaxResults
@@ -130,7 +131,7 @@ func maybeDelaySearch() {
 	lastSearchMu.Lock()
 	defer lastSearchMu.Unlock()
 
-	minGap := time.Duration(500+rand.Intn(1500)) * time.Millisecond
+	minGap := time.Duration(500+rand.IntN(1500)) * time.Millisecond
 	elapsed := time.Since(lastSearchTime)
 	if elapsed < minGap {
 		time.Sleep(minGap - elapsed)
@@ -139,9 +140,9 @@ func maybeDelaySearch() {
 }
 
 func (t *searchTool) searchDuckDuckGo(query string, maxResults int) ([]SearchResult, error) {
-	searchURL := fmt.Sprintf("https://lite.duckduckgo.com/lite/?q=%s", url.QueryEscape(query))
+	searchURL := "https://lite.duckduckgo.com/lite/?q=" + url.QueryEscape(query)
 
-	req, err := http.NewRequest(http.MethodGet, searchURL, nil)
+	req, err := http.NewRequest(http.MethodGet, searchURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -175,7 +176,7 @@ func randomUserAgent() string {
 		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.0",
 		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.0",
 	}
-	return agents[rand.Intn(len(agents))]
+	return agents[rand.IntN(len(agents))]
 }
 
 func parseLiteSearchResults(doc *html.Node, maxResults int) []SearchResult {

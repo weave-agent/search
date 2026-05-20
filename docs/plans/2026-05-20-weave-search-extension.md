@@ -80,11 +80,11 @@ Add a `search` tool to weave that performs web searches via DuckDuckGo Lite scra
 
 ### Task 4: Polish and validate
 
-- [ ] Add tool description markdown file (`search.md`)
-- [ ] Verify tool definition JSON schema is correct
-- [ ] Run linter: `make lint` or `golangci-lint run`
-- [ ] Run formatter: `make fmt`
-- [ ] Verify test coverage is 80%+
+- [x] Add tool description markdown file (`search.md`)
+- [x] Verify tool definition JSON schema is correct
+- [x] Run linter: `make lint` or `golangci-lint run`
+- [x] Run formatter: `make fmt`
+- [x] Verify test coverage is 80%+
 
 ### Task 5: Integration test with weave core
 
