@@ -51,6 +51,9 @@ func init() {
 		if maxResults <= 0 {
 			maxResults = 10
 		}
+		if maxResults > maxResultsCap {
+			maxResults = maxResultsCap
+		}
 
 		timeout := cfg.Timeout
 		if timeout <= 0 {
@@ -161,23 +164,25 @@ func (t *searchTool) Execute(ctx context.Context, args map[string]any) (sdk.Tool
 }
 
 func (t *searchTool) maybeDelaySearch(ctx context.Context) error {
-	t.lastSearchMu.Lock()
-	minGap := time.Duration(500+rand.IntN(1500)) * time.Millisecond
-	elapsed := time.Since(t.lastSearchTime)
-	t.lastSearchMu.Unlock()
+	for {
+		t.lastSearchMu.Lock()
+		minGap := time.Duration(500+rand.IntN(1500)) * time.Millisecond
+		elapsed := time.Since(t.lastSearchTime)
+		if elapsed >= minGap {
+			t.lastSearchTime = time.Now()
+			t.lastSearchMu.Unlock()
+			return nil
+		}
+		remaining := minGap - elapsed
+		t.lastSearchMu.Unlock()
 
-	if elapsed < minGap {
 		select {
-		case <-time.After(minGap - elapsed):
+		case <-time.After(remaining):
+			// Loop back and re-check with fresh lock.
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
-
-	t.lastSearchMu.Lock()
-	t.lastSearchTime = time.Now()
-	t.lastSearchMu.Unlock()
-	return nil
 }
 
 func (t *searchTool) searchDuckDuckGo(ctx context.Context, query string, maxResults int) ([]SearchResult, error) {
@@ -196,7 +201,10 @@ func (t *searchTool) searchDuckDuckGo(ctx context.Context, query string, maxResu
 	if err != nil {
 		return nil, fmt.Errorf("http request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
@@ -231,10 +239,8 @@ func parseLiteSearchResults(doc *html.Node, maxResults int) []SearchResult {
 		}
 
 		if n.Type == html.ElementNode {
-			class := getAttr(n, "class")
-
 			switch {
-			case strings.Contains(class, "result-link"):
+			case hasClass(n, "result-link"):
 				current = &SearchResult{Position: len(results) + 1}
 				title := extractText(n)
 				if title != "" {
@@ -245,7 +251,7 @@ func parseLiteSearchResults(doc *html.Node, maxResults int) []SearchResult {
 					current.Link = cleanDuckDuckGoURL(href)
 				}
 
-			case strings.Contains(class, "result-snippet"):
+			case hasClass(n, "result-snippet"):
 				snippet := extractText(n)
 				if snippet != "" {
 					if current == nil {
@@ -268,6 +274,19 @@ func parseLiteSearchResults(doc *html.Node, maxResults int) []SearchResult {
 
 	f(doc)
 	return results
+}
+
+func hasClass(n *html.Node, class string) bool {
+	for _, attr := range n.Attr {
+		if attr.Key == "class" {
+			for _, c := range strings.Fields(attr.Val) {
+				if c == class {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func getAttr(n *html.Node, key string) string {
@@ -315,6 +334,11 @@ func cleanDuckDuckGoURL(rawURL string) string {
 
 	decoded, err := url.QueryUnescape(uddg)
 	if err != nil {
+		return rawURL
+	}
+
+	u, err := url.Parse(decoded)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return rawURL
 	}
 

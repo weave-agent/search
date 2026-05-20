@@ -91,6 +91,16 @@ func TestCleanDuckDuckGoURL(t *testing.T) {
 			input:    "//duckduckgo.com/l/?uddg=%ZZ",
 			expected: "//duckduckgo.com/l/?uddg=%ZZ",
 		},
+		{
+			name:     "javascript scheme rejected",
+			input:    "//duckduckgo.com/l/?uddg=javascript%3Aalert(1)",
+			expected: "//duckduckgo.com/l/?uddg=javascript%3Aalert(1)",
+		},
+		{
+			name:     "file scheme rejected",
+			input:    "//duckduckgo.com/l/?uddg=file%3A%2F%2F%2Fetc%2Fpasswd",
+			expected: "//duckduckgo.com/l/?uddg=file%3A%2F%2F%2Fetc%2Fpasswd",
+		},
 	}
 
 	for _, tt := range tests {
@@ -399,6 +409,31 @@ func TestGetAttr_Missing(t *testing.T) {
 
 	assert.Equal(t, "foo", getAttr(divNode, "class"))
 	assert.Empty(t, getAttr(divNode, "id"))
+}
+
+func TestHasClass(t *testing.T) {
+	htmlDoc := `<div class="result-link extra-class"></div>`
+	doc, err := html.Parse(strings.NewReader(htmlDoc))
+	require.NoError(t, err)
+
+	var divNode *html.Node
+	var findDiv func(*html.Node)
+	findDiv = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "div" {
+			divNode = n
+			return
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			findDiv(c)
+		}
+	}
+	findDiv(doc)
+	require.NotNil(t, divNode)
+
+	assert.True(t, hasClass(divNode, "result-link"), "should match exact class")
+	assert.True(t, hasClass(divNode, "extra-class"), "should match second class")
+	assert.False(t, hasClass(divNode, "result-link-extra"), "should not match partial class name")
+	assert.False(t, hasClass(divNode, "link"), "should not match substring")
 }
 
 // httpRoundTripperFunc allows using a function as RoundTripper.
@@ -1189,14 +1224,18 @@ func TestMaybeDelaySearch_ContextCancellation(t *testing.T) {
 	tool := &searchTool{}
 	tool.lastSearchMu.Lock()
 	tool.lastSearchTime = time.Now()
-	tool.lastSearchMu.Unlock()
 	originalTime := tool.lastSearchTime
+	tool.lastSearchMu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
 	err := tool.maybeDelaySearch(ctx)
 	require.ErrorIs(t, err, context.Canceled)
+
+	tool.lastSearchMu.Lock()
+	finalTime := tool.lastSearchTime
+	tool.lastSearchMu.Unlock()
 	// lastSearchTime should NOT be updated when cancelled during delay
-	assert.Equal(t, originalTime, tool.lastSearchTime)
+	assert.Equal(t, originalTime, finalTime)
 }
