@@ -98,28 +98,40 @@ func (t *searchTool) Execute(ctx context.Context, args map[string]any) (sdk.Tool
 	if v, ok := args[paramMaxResults]; ok {
 		switch n := v.(type) {
 		case float64:
-			if n > 0 {
+			if n > 0 && n <= float64(maxResultsCap) {
 				maxResults = int(n)
+			} else if n > float64(maxResultsCap) {
+				maxResults = maxResultsCap
 			}
 		case int:
-			if n > 0 {
+			if n > 0 && n <= maxResultsCap {
 				maxResults = n
+			} else if n > maxResultsCap {
+				maxResults = maxResultsCap
 			}
 		case int64:
 			if n > 0 && n <= int64(maxResultsCap) {
 				maxResults = int(n)
+			} else if n > int64(maxResultsCap) {
+				maxResults = maxResultsCap
 			}
 		case uint:
 			if n > 0 && n <= uint(maxResultsCap) {
 				maxResults = int(n)
+			} else if n > uint(maxResultsCap) {
+				maxResults = maxResultsCap
 			}
 		case uint64:
 			if n > 0 && n <= uint64(maxResultsCap) {
 				maxResults = int(n)
+			} else if n > uint64(maxResultsCap) {
+				maxResults = maxResultsCap
 			}
 		case string:
-			if parsed, err := strconv.Atoi(n); err == nil && parsed > 0 {
+			if parsed, err := strconv.Atoi(n); err == nil && parsed > 0 && parsed <= maxResultsCap {
 				maxResults = parsed
+			} else if err == nil && parsed > maxResultsCap {
+				maxResults = maxResultsCap
 			}
 		}
 	}
@@ -127,7 +139,9 @@ func (t *searchTool) Execute(ctx context.Context, args map[string]any) (sdk.Tool
 		maxResults = maxResultsCap
 	}
 
-	t.maybeDelaySearch(ctx)
+	if err := t.maybeDelaySearch(ctx); err != nil {
+		return sdk.ToolResult{Content: fmt.Sprintf("error: %s", err), IsError: true}, nil
+	}
 
 	results, err := t.searchDuckDuckGo(ctx, query, maxResults)
 	if err != nil {
@@ -146,7 +160,7 @@ func (t *searchTool) Execute(ctx context.Context, args map[string]any) (sdk.Tool
 	return sdk.ToolResult{Content: strings.Join(lines, "\n\n"), IsError: false}, nil
 }
 
-func (t *searchTool) maybeDelaySearch(ctx context.Context) {
+func (t *searchTool) maybeDelaySearch(ctx context.Context) error {
 	t.lastSearchMu.Lock()
 	defer t.lastSearchMu.Unlock()
 
@@ -156,10 +170,11 @@ func (t *searchTool) maybeDelaySearch(ctx context.Context) {
 		select {
 		case <-time.After(minGap - elapsed):
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		}
 	}
 	t.lastSearchTime = time.Now()
+	return nil
 }
 
 func (t *searchTool) searchDuckDuckGo(ctx context.Context, query string, maxResults int) ([]SearchResult, error) {
@@ -195,9 +210,9 @@ func (t *searchTool) searchDuckDuckGo(ctx context.Context, query string, maxResu
 
 func randomUserAgent() string {
 	agents := []string{
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 	}
 	return agents[rand.IntN(len(agents))]
 }
@@ -217,17 +232,13 @@ func parseLiteSearchResults(doc *html.Node, maxResults int) []SearchResult {
 
 			switch {
 			case strings.Contains(class, "result-link"):
-				if n.FirstChild != nil && n.FirstChild.Type == html.TextNode {
-					if current == nil {
-						current = &SearchResult{Position: len(results) + 1}
-					}
-					current.Title = strings.TrimSpace(n.FirstChild.Data)
+				current = &SearchResult{Position: len(results) + 1}
+				title := extractText(n)
+				if title != "" {
+					current.Title = title
 				}
 				href := getAttr(n, "href")
 				if href != "" {
-					if current == nil {
-						current = &SearchResult{Position: len(results) + 1}
-					}
 					current.Link = cleanDuckDuckGoURL(href)
 				}
 

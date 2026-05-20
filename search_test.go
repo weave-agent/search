@@ -295,6 +295,48 @@ func TestParseLiteSearchResults_RealisticDDG(t *testing.T) {
 	assert.Equal(t, "https://github.com/golang", results[2].Link)
 }
 
+func TestParseLiteSearchResults_FormattedTitle(t *testing.T) {
+	htmlDoc := `
+<!DOCTYPE html>
+<html><body>
+<table>
+<tr><td><a class="result-link" href="https://example.com"><b>Bold</b> Title</a></td></tr>
+<tr><td class="result-snippet">Snippet text.</td></tr>
+</table>
+</body></html>
+`
+	doc, err := html.Parse(strings.NewReader(htmlDoc))
+	require.NoError(t, err)
+
+	results := parseLiteSearchResults(doc, 10)
+	require.Len(t, results, 1)
+	assert.Equal(t, "Bold Title", results[0].Title)
+	assert.Equal(t, "https://example.com", results[0].Link)
+	assert.Equal(t, "Snippet text.", results[0].Snippet)
+}
+
+func TestParseLiteSearchResults_MultipleLinksNoMixing(t *testing.T) {
+	htmlDoc := `
+<!DOCTYPE html>
+<html><body>
+<table>
+<tr><td><a class="result-link" href="https://first.com">First Title</a></td></tr>
+<tr><td><a class="result-link" href="https://second.com">Second Title</a></td></tr>
+<tr><td class="result-snippet">Second snippet.</td></tr>
+</table>
+</body></html>
+`
+	doc, err := html.Parse(strings.NewReader(htmlDoc))
+	require.NoError(t, err)
+
+	results := parseLiteSearchResults(doc, 10)
+	require.Len(t, results, 1)
+	// Should use the SECOND link's data (closest to snippet), not mix first link with second snippet
+	assert.Equal(t, "Second Title", results[0].Title)
+	assert.Equal(t, "https://second.com", results[0].Link)
+	assert.Equal(t, "Second snippet.", results[0].Snippet)
+}
+
 func TestParseLiteSearchResults_MalformedHTML(t *testing.T) {
 	htmlDoc := `<html><body><table><tr><td><a class="result-link" href="https://example.com">Title</a><td class="result-snippet">Snippet</td></tr></table></body></html>`
 	doc, err := html.Parse(strings.NewReader(htmlDoc))
@@ -804,6 +846,186 @@ func TestSearchTool_Execute_NonIntMaxResults(t *testing.T) {
 	assert.Contains(t, result.Content, "1. Title")
 }
 
+func TestSearchTool_Execute_MaxResultsInt64(t *testing.T) {
+	htmlBody := `
+<!DOCTYPE html>
+<html><body>
+<table>
+<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
+<tr><td class="result-snippet">Snippet</td></tr>
+</table>
+</body></html>
+`
+	tool := &searchTool{
+		defaultMaxResults: 10,
+		httpClient: &http.Client{
+			Transport: httpRoundTripperFunc{
+				fn: func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(htmlBody)),
+					}, nil
+				},
+			},
+		},
+	}
+
+	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": int64(1)})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "1. Title")
+}
+
+func TestSearchTool_Execute_MaxResultsInt64OverCap(t *testing.T) {
+	htmlBody := `
+<!DOCTYPE html>
+<html><body>
+<table>
+<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
+<tr><td class="result-snippet">Snippet</td></tr>
+</table>
+</body></html>
+`
+	tool := &searchTool{
+		defaultMaxResults: 10,
+		httpClient: &http.Client{
+			Transport: httpRoundTripperFunc{
+				fn: func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(htmlBody)),
+					}, nil
+				},
+			},
+		},
+	}
+
+	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": int64(100)})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "1. Title")
+}
+
+func TestSearchTool_Execute_MaxResultsUint(t *testing.T) {
+	htmlBody := `
+<!DOCTYPE html>
+<html><body>
+<table>
+<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
+<tr><td class="result-snippet">Snippet</td></tr>
+</table>
+</body></html>
+`
+	tool := &searchTool{
+		defaultMaxResults: 10,
+		httpClient: &http.Client{
+			Transport: httpRoundTripperFunc{
+				fn: func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(htmlBody)),
+					}, nil
+				},
+			},
+		},
+	}
+
+	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": uint(1)})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "1. Title")
+}
+
+func TestSearchTool_Execute_MaxResultsUint64(t *testing.T) {
+	htmlBody := `
+<!DOCTYPE html>
+<html><body>
+<table>
+<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
+<tr><td class="result-snippet">Snippet</td></tr>
+</table>
+</body></html>
+`
+	tool := &searchTool{
+		defaultMaxResults: 10,
+		httpClient: &http.Client{
+			Transport: httpRoundTripperFunc{
+				fn: func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(htmlBody)),
+					}, nil
+				},
+			},
+		},
+	}
+
+	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": uint64(1)})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "1. Title")
+}
+
+func TestSearchTool_Execute_MaxResultsString(t *testing.T) {
+	htmlBody := `
+<!DOCTYPE html>
+<html><body>
+<table>
+<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
+<tr><td class="result-snippet">Snippet</td></tr>
+</table>
+</body></html>
+`
+	tool := &searchTool{
+		defaultMaxResults: 10,
+		httpClient: &http.Client{
+			Transport: httpRoundTripperFunc{
+				fn: func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(htmlBody)),
+					}, nil
+				},
+			},
+		},
+	}
+
+	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": "1"})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "1. Title")
+}
+
+func TestSearchTool_Execute_MaxResultsStringOverCap(t *testing.T) {
+	htmlBody := `
+<!DOCTYPE html>
+<html><body>
+<table>
+<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
+<tr><td class="result-snippet">Snippet</td></tr>
+</table>
+</body></html>
+`
+	tool := &searchTool{
+		defaultMaxResults: 10,
+		httpClient: &http.Client{
+			Transport: httpRoundTripperFunc{
+				fn: func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(htmlBody)),
+					}, nil
+				},
+			},
+		},
+	}
+
+	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": "100"})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "1. Title")
+}
+
 func TestSearchTool_Execute_FloatMaxResults(t *testing.T) {
 	htmlBody := `
 <!DOCTYPE html>
@@ -899,9 +1121,9 @@ func TestSearchTool_Execute_ResultsFormatting(t *testing.T) {
 
 func TestRandomUserAgent(t *testing.T) {
 	knownAgents := map[string]bool{
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36":      true,
-		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36": true,
-		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36":                true,
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36":      true,
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36": true,
+		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36":                true,
 	}
 
 	ua := randomUserAgent()
@@ -916,7 +1138,8 @@ func TestMaybeDelaySearch(t *testing.T) {
 	tool.lastSearchTime = time.Time{}
 	tool.lastSearchMu.Unlock()
 
-	tool.maybeDelaySearch(context.Background())
+	err := tool.maybeDelaySearch(context.Background())
+	require.NoError(t, err)
 	assert.False(t, tool.lastSearchTime.IsZero())
 }
 
@@ -927,7 +1150,8 @@ func TestMaybeDelaySearch_RateLimits(t *testing.T) {
 	tool.lastSearchMu.Unlock()
 
 	// Verify delay executes and updates lastSearchTime without asserting wall-clock duration
-	tool.maybeDelaySearch(context.Background())
+	err := tool.maybeDelaySearch(context.Background())
+	require.NoError(t, err)
 	assert.False(t, tool.lastSearchTime.IsZero())
 }
 
@@ -937,10 +1161,12 @@ func TestMaybeDelaySearch_RespectsMinGap(t *testing.T) {
 	tool.lastSearchTime = time.Time{}
 	tool.lastSearchMu.Unlock()
 
-	tool.maybeDelaySearch(context.Background())
+	err := tool.maybeDelaySearch(context.Background())
+	require.NoError(t, err)
 	firstTime := tool.lastSearchTime
 
-	tool.maybeDelaySearch(context.Background())
+	err = tool.maybeDelaySearch(context.Background())
+	require.NoError(t, err)
 	secondTime := tool.lastSearchTime
 
 	assert.True(t, secondTime.After(firstTime) || secondTime.Equal(firstTime))
@@ -954,11 +1180,29 @@ func TestMaybeDelaySearch_Concurrent(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 5 {
-		wg.Go(func() { tool.maybeDelaySearch(context.Background()) })
+		wg.Go(func() {
+			_ = tool.maybeDelaySearch(context.Background())
+		})
 	}
 	wg.Wait()
 
 	tool.lastSearchMu.Lock()
 	assert.False(t, tool.lastSearchTime.IsZero())
 	tool.lastSearchMu.Unlock()
+}
+
+func TestMaybeDelaySearch_ContextCancellation(t *testing.T) {
+	tool := &searchTool{}
+	tool.lastSearchMu.Lock()
+	tool.lastSearchTime = time.Now()
+	tool.lastSearchMu.Unlock()
+	originalTime := tool.lastSearchTime
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	err := tool.maybeDelaySearch(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	// lastSearchTime should NOT be updated when cancelled during delay
+	assert.Equal(t, originalTime, tool.lastSearchTime)
 }
