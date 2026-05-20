@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -599,21 +600,15 @@ func TestSearchDuckDuckGo_RequestHeadersSet(t *testing.T) {
 }
 
 func TestSearchTool_Execute_MaxResultsCap(t *testing.T) {
-	htmlBody := `
-<!DOCTYPE html>
-<html>
-<body>
-<table>
-<tr><td><a class="result-link" href="https://1.com">1</a></td></tr>
-<tr><td class="result-snippet">s1</td></tr>
-<tr><td><a class="result-link" href="https://2.com">2</a></td></tr>
-<tr><td class="result-snippet">s2</td></tr>
-<tr><td><a class="result-link" href="https://3.com">3</a></td></tr>
-<tr><td class="result-snippet">s3</td></tr>
-</table>
-</body>
-</html>
-`
+	htmlParts := make([]string, 0, 52)
+	htmlParts = append(htmlParts, "<!DOCTYPE html><html><body><table>")
+	for i := range 25 {
+		htmlParts = append(htmlParts, fmt.Sprintf(`<tr><td><a class="result-link" href="https://%d.com">%d</a></td></tr>`, i+1, i+1))
+		htmlParts = append(htmlParts, fmt.Sprintf(`<tr><td class="result-snippet">snippet %d</td></tr>`, i+1))
+	}
+	htmlParts = append(htmlParts, "</table></body></html>")
+	htmlBody := strings.Join(htmlParts, "\n")
+
 	tool := &searchTool{
 		defaultMaxResults: 2,
 		httpClient: &http.Client{
@@ -631,9 +626,8 @@ func TestSearchTool_Execute_MaxResultsCap(t *testing.T) {
 	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": 50})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
-	assert.Contains(t, result.Content, "1. 1")
-	assert.Contains(t, result.Content, "2. 2")
-	assert.Contains(t, result.Content, "3. 3")
+	assert.Contains(t, result.Content, "20. 20")
+	assert.NotContains(t, result.Content, "21. 21")
 }
 
 func TestSearchTool_Execute_DefaultMaxResultsUsed(t *testing.T) {

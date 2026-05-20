@@ -78,7 +78,7 @@ func (t *searchTool) Definition() sdk.ToolDef {
 					"description": "Search query string.",
 				},
 				paramMaxResults: map[string]any{
-					"type":        "number",
+					"type":        "integer",
 					"description": "Maximum number of results to return. Capped at 20.",
 				},
 			},
@@ -162,10 +162,10 @@ func (t *searchTool) Execute(ctx context.Context, args map[string]any) (sdk.Tool
 
 func (t *searchTool) maybeDelaySearch(ctx context.Context) error {
 	t.lastSearchMu.Lock()
-	defer t.lastSearchMu.Unlock()
-
 	minGap := time.Duration(500+rand.IntN(1500)) * time.Millisecond
 	elapsed := time.Since(t.lastSearchTime)
+	t.lastSearchMu.Unlock()
+
 	if elapsed < minGap {
 		select {
 		case <-time.After(minGap - elapsed):
@@ -173,7 +173,10 @@ func (t *searchTool) maybeDelaySearch(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+
+	t.lastSearchMu.Lock()
 	t.lastSearchTime = time.Now()
+	t.lastSearchMu.Unlock()
 	return nil
 }
 
