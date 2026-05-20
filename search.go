@@ -36,7 +36,6 @@ type SearchResult struct {
 
 type searchTool struct {
 	defaultMaxResults int
-	timeout           time.Duration
 	httpClient        *http.Client
 }
 
@@ -60,7 +59,6 @@ func init() {
 
 		return &searchTool{
 			defaultMaxResults: maxResults,
-			timeout:           time.Duration(timeout) * time.Second,
 			httpClient:        &http.Client{Timeout: time.Duration(timeout) * time.Second},
 		}, nil
 	})
@@ -172,9 +170,9 @@ func (t *searchTool) searchDuckDuckGo(query string, maxResults int) ([]SearchRes
 
 func randomUserAgent() string {
 	agents := []string{
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.0",
-		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.0",
-		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.0",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
 	}
 	return agents[rand.IntN(len(agents))]
 }
@@ -243,6 +241,10 @@ func getAttr(n *html.Node, key string) string {
 }
 
 func extractText(n *html.Node) string {
+	if n == nil {
+		return ""
+	}
+
 	var b strings.Builder
 	var f func(*html.Node)
 	f = func(n *html.Node) {
