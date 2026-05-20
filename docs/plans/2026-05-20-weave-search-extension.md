@@ -71,12 +71,12 @@ Add a `search` tool to weave that performs web searches via DuckDuckGo Lite scra
 
 ### Task 3: Write tests for search tool
 
-- [ ] Write tests for `parseLiteSearchResults` with sample HTML
-- [ ] Write tests for `cleanDuckDuckGoURL` with various redirect formats
-- [ ] Write tests for `searchDuckDuckGo` with mocked HTTP client
-- [ ] Write tests for rate limiting behavior
-- [ ] Write tests for error cases: empty query, HTTP failure, non-200 status, parse failure
-- [ ] Run tests: `go test ./...` — must pass
+- [x] Write tests for `parseLiteSearchResults` with sample HTML
+- [x] Write tests for `cleanDuckDuckGoURL` with various redirect formats
+- [x] Write tests for `searchDuckDuckGo` with mocked HTTP client
+- [x] Write tests for rate limiting behavior
+- [x] Write tests for error cases: empty query, HTTP failure, non-200 status, parse failure
+- [x] Run tests: `go test ./...` — must pass
 
 ### Task 4: Polish and validate
 
