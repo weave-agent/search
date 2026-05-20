@@ -3,9 +3,11 @@ package search
 import (
 	"context"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +20,7 @@ const (
 	paramQuery      = "query"
 	paramMaxResults = "max_results"
 	maxResultsCap   = 20
+	maxBodySize     = 10 * 1024 * 1024 // 10 MB
 )
 
 // SearchConfig holds per-tool settings for the search tool.
@@ -37,12 +40,9 @@ type SearchResult struct {
 type searchTool struct {
 	defaultMaxResults int
 	httpClient        *http.Client
+	lastSearchMu      sync.Mutex
+	lastSearchTime    time.Time
 }
-
-var (
-	lastSearchMu   sync.Mutex
-	lastSearchTime time.Time
-)
 
 //nolint:gochecknoinits // SDK pattern requires init() for tool registration.
 func init() {
@@ -88,7 +88,7 @@ func (t *searchTool) Definition() sdk.ToolDef {
 	}
 }
 
-func (t *searchTool) Execute(_ context.Context, args map[string]any) (sdk.ToolResult, error) {
+func (t *searchTool) Execute(ctx context.Context, args map[string]any) (sdk.ToolResult, error) {
 	query, ok := args[paramQuery].(string)
 	if !ok || strings.TrimSpace(query) == "" {
 		return sdk.ToolResult{Content: "error: query is required and must be non-empty", IsError: true}, nil
@@ -96,19 +96,40 @@ func (t *searchTool) Execute(_ context.Context, args map[string]any) (sdk.ToolRe
 
 	maxResults := t.defaultMaxResults
 	if v, ok := args[paramMaxResults]; ok {
-		if f, ok := v.(float64); ok && f > 0 {
-			maxResults = int(f)
-		} else if i, ok := v.(int); ok && i > 0 {
-			maxResults = i
+		switch n := v.(type) {
+		case float64:
+			if n > 0 {
+				maxResults = int(n)
+			}
+		case int:
+			if n > 0 {
+				maxResults = n
+			}
+		case int64:
+			if n > 0 && n <= int64(maxResultsCap) {
+				maxResults = int(n)
+			}
+		case uint:
+			if n > 0 && n <= uint(maxResultsCap) {
+				maxResults = int(n)
+			}
+		case uint64:
+			if n > 0 && n <= uint64(maxResultsCap) {
+				maxResults = int(n)
+			}
+		case string:
+			if parsed, err := strconv.Atoi(n); err == nil && parsed > 0 {
+				maxResults = parsed
+			}
 		}
 	}
 	if maxResults > maxResultsCap {
 		maxResults = maxResultsCap
 	}
 
-	maybeDelaySearch()
+	t.maybeDelaySearch(ctx)
 
-	results, err := t.searchDuckDuckGo(query, maxResults)
+	results, err := t.searchDuckDuckGo(ctx, query, maxResults)
 	if err != nil {
 		return sdk.ToolResult{Content: fmt.Sprintf("error: %s", err), IsError: true}, nil
 	}
@@ -125,22 +146,26 @@ func (t *searchTool) Execute(_ context.Context, args map[string]any) (sdk.ToolRe
 	return sdk.ToolResult{Content: strings.Join(lines, "\n\n"), IsError: false}, nil
 }
 
-func maybeDelaySearch() {
-	lastSearchMu.Lock()
-	defer lastSearchMu.Unlock()
+func (t *searchTool) maybeDelaySearch(ctx context.Context) {
+	t.lastSearchMu.Lock()
+	defer t.lastSearchMu.Unlock()
 
 	minGap := time.Duration(500+rand.IntN(1500)) * time.Millisecond
-	elapsed := time.Since(lastSearchTime)
+	elapsed := time.Since(t.lastSearchTime)
 	if elapsed < minGap {
-		time.Sleep(minGap - elapsed)
+		select {
+		case <-time.After(minGap - elapsed):
+		case <-ctx.Done():
+			return
+		}
 	}
-	lastSearchTime = time.Now()
+	t.lastSearchTime = time.Now()
 }
 
-func (t *searchTool) searchDuckDuckGo(query string, maxResults int) ([]SearchResult, error) {
+func (t *searchTool) searchDuckDuckGo(ctx context.Context, query string, maxResults int) ([]SearchResult, error) {
 	searchURL := "https://lite.duckduckgo.com/lite/?q=" + url.QueryEscape(query)
 
-	req, err := http.NewRequest(http.MethodGet, searchURL, http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -159,7 +184,7 @@ func (t *searchTool) searchDuckDuckGo(query string, maxResults int) ([]SearchRes
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	doc, err := html.Parse(resp.Body)
+	doc, err := html.Parse(io.LimitReader(resp.Body, maxBodySize))
 	if err != nil {
 		return nil, fmt.Errorf("parse html: %w", err)
 	}
