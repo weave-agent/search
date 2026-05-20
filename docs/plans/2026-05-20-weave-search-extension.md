@@ -44,10 +44,10 @@ Add a `search` tool to weave that performs web searches via DuckDuckGo Lite scra
 
 ### Task 1: Bootstrap extension module
 
-- [ ] Create `go.mod` with module `github.com/weave-agent/weave-search`
-- [ ] Create `README.md` with tool description and install instructions
-- [ ] Create `CLAUDE.md` with extension-specific guidance
-- [ ] Verify module builds: `go build ./...`
+- [x] Create `go.mod` with module `github.com/weave-agent/weave-search`
+- [x] Create `README.md` with tool description and install instructions
+- [x] Create `CLAUDE.md` with extension-specific guidance
+- [x] Verify module builds: `go build ./...`
 
 ### Task 2: Implement search tool core
 
