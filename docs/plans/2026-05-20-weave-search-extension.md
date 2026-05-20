@@ -10,7 +10,7 @@ Add a `search` tool to weave that performs web searches via DuckDuckGo Lite scra
 
 ## Context (from discovery)
 
-- **Files/components involved**: New extension repo `github.com/weave-agent/weave-search`
+- **Files/components involved**: `search.go`, `search_test.go`, `search.md`, `README.md`, `CLAUDE.md`, `go.mod`, `.golangci.yml`
 - **Related patterns**: `read`, `grep`, `find`, `ls` — all read-only tools that execute concurrently
 - **Reference implementation**: crush's `web_search` tool at `internal/agent/tools/web_search.go` and `search.go`
 - **Dependencies**: `golang.org/x/net/html` (HTML parsing), standard `net/http`
@@ -81,6 +81,7 @@ Add a `search` tool to weave that performs web searches via DuckDuckGo Lite scra
 ### Task 4: Polish and validate
 
 - [x] Add tool description markdown file (`search.md`)
+- [x] Create `.golangci.yml` with project-specific linter rules
 - [x] Verify tool definition JSON schema is correct
 - [x] Run linter: `make lint` or `golangci-lint run`
 - [x] Run formatter: `make fmt`
@@ -88,11 +89,11 @@ Add a `search` tool to weave that performs web searches via DuckDuckGo Lite scra
 
 ### Task 5: Integration test with weave core
 
-- [x] Install extension locally: `weave install /path/to/search` (skipped - not automatable, requires weave CLI)
-- [x] Verify `weave list` shows the extension (skipped - not automatable, requires weave CLI)
-- [x] Run weave and verify `search` appears in tool list (skipped - not automatable, requires weave CLI)
-- [x] Test actual search query end-to-end (skipped - not automatable, requires weave CLI)
-- [x] Verify results format in conversation (skipped - not automatable, requires weave CLI)
+- [-] Install extension locally: `weave install /path/to/search` (skipped - not automatable, requires weave CLI)
+- [-] Verify `weave list` shows the extension (skipped - not automatable, requires weave CLI)
+- [-] Run weave and verify `search` appears in tool list (skipped - not automatable, requires weave CLI)
+- [-] Test actual search query end-to-end (skipped - not automatable, requires weave CLI)
+- [-] Verify results format in conversation (skipped - not automatable, requires weave CLI)
 
 ## Technical Details
 
@@ -146,11 +147,11 @@ func maybeDelaySearch() {
 
 ## Post-Completion
 
-**Manual verification:**
+**Manual verification:** (deferred — requires weave CLI)
 - Test search with various queries (code, docs, news)
 - Verify rate limiting works under rapid successive calls
 - Check behavior when DDG returns no results or blocks
 
-**External system updates:**
+**External system updates:** (pending — requires repo creation and weave core changes)
 - Add `search` to first-run bootstrap list in `weave/internal/extmanage/bootstrap.go`
 - Create GitHub repo `weave-agent/weave-search`

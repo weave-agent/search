@@ -9,6 +9,13 @@ Search the web using DuckDuckGo Lite. Returns numbered search results with title
 | `query` | string | yes | Search query string |
 | `max_results` | number | no | Maximum number of results to return (capped at 20, default: 10) |
 
+## Configuration
+
+| Name | Type | Default | Env Var | Description |
+|------|------|---------|---------|-------------|
+| `max_results` | int | 10 | `MAX_RESULTS` | Default maximum results per search |
+| `timeout` | int | 30 | `TIMEOUT` | HTTP request timeout in seconds |
+
 ## Returns
 
 Numbered list of search results, each containing:

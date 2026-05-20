@@ -44,4 +44,6 @@ A random 500ms–2s delay between searches, protected by `sync.Mutex`. This is i
 
 - Name: `search`
 - Parameters: `query` (string, required), `max_results` (int, optional, capped at 20)
+- Configuration: `max_results` (int, default 10, env `MAX_RESULTS`), `timeout` (int, default 30s, env `TIMEOUT`)
+- Strict schema: `additionalProperties: false`
 - Read-only: executes concurrently with other read-only tools

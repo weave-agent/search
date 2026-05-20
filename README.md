@@ -25,6 +25,11 @@ Parameters:
 - `query` (string, required): search query
 - `max_results` (int, optional): max results to return, capped at 20
 
+## Configuration
+
+- `max_results` (int, default: 10, env: `MAX_RESULTS`): default maximum results per search
+- `timeout` (int, default: 30, env: `TIMEOUT`): HTTP request timeout in seconds
+
 Returns numbered search results with title, URL, and snippet.
 
 ## Development
@@ -36,7 +41,11 @@ cd weave-search
 # Add temporary replace for local SDK (don't commit this)
 echo 'replace github.com/weave-agent/weave => /path/to/local/weave' >> go.mod
 
+# Run tests
 go test ./...
+
+# Run linter
+golangci-lint run
 ```
 
 ## License
