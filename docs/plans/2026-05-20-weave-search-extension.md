@@ -51,23 +51,23 @@ Add a `search` tool to weave that performs web searches via DuckDuckGo Lite scra
 
 ### Task 2: Implement search tool core
 
-- [ ] Create `search.go` with config struct:
+- [x] Create `search.go` with config struct:
   ```go
   type SearchConfig struct {
       MaxResults int `json:"max_results" default:"10" env:"MAX_RESULTS"`
       Timeout    int `json:"timeout"    default:"30" env:"TIMEOUT"`
   }
   ```
-- [ ] Implement `searchTool` struct with `sdk.Tool` interface
-- [ ] Implement `init()` with `sdk.RegisterTool[SearchConfig]`
-- [ ] Implement DDG Lite scraping:
+- [x] Implement `searchTool` struct with `sdk.Tool` interface
+- [x] Implement `init()` with `sdk.RegisterTool[SearchConfig]`
+- [x] Implement DDG Lite scraping:
   - Build URL: `https://lite.duckduckgo.com/lite/?q=<query>`
   - HTTP GET with randomized User-Agent and Accept-Language headers
   - Parse HTML with `golang.org/x/net/html`
   - Extract `.result-link` (title, href) and `.result-snippet` (description)
   - Clean DDG redirect URLs (`//duckduckgo.com/l/?uddg=...` → real URL)
-- [ ] Implement rate limiting: random 500ms–2s delay between searches (mutex-protected)
-- [ ] Format results as numbered list
+- [x] Implement rate limiting: random 500ms–2s delay between searches (mutex-protected)
+- [x] Format results as numbered list
 
 ### Task 3: Write tests for search tool
 
