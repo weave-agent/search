@@ -2,14 +2,17 @@ package search
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
-	"math/rand/v2"
+	mathrand "math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/weave-agent/weave/sdk"
@@ -29,6 +32,9 @@ var (
 	lastSearchMu        sync.Mutex
 	lastSearchTime      time.Time
 	searchCooldownUntil time.Time
+	guardianMu          sync.RWMutex
+	guardian            sdk.Guardian
+	requestSeq          atomic.Uint64
 )
 
 // SearchConfig holds per-tool settings for the search tool.
@@ -50,8 +56,34 @@ type searchTool struct {
 	httpClient        *http.Client
 }
 
+func setGuardian(g sdk.Guardian) {
+	guardianMu.Lock()
+	guardian = g
+	guardianMu.Unlock()
+}
+
+func getGuardian() sdk.Guardian {
+	guardianMu.RLock()
+
+	g := guardian
+
+	guardianMu.RUnlock()
+
+	return g
+}
+
 //nolint:gochecknoinits // SDK pattern requires init() for tool registration.
 func init() {
+	sdk.OnBusReady(func(bus sdk.Bus) {
+		bus.On(sdk.GuardianRegisteredTopic, func(ev sdk.Event) error {
+			if g, ok := ev.Payload.(sdk.Guardian); ok {
+				setGuardian(g)
+			}
+
+			return nil
+		})
+	})
+
 	sdk.RegisterTool("search", func(_ sdk.Config, _ sdk.PreferenceReader, cfg SearchConfig) (sdk.Tool, error) {
 		maxResults := cfg.MaxResults
 		if maxResults <= 0 {
@@ -97,10 +129,91 @@ func (t *searchTool) Definition() sdk.ToolDef {
 	}
 }
 
+func newRequestID(prefix string) string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return prefix + "-" + hex.EncodeToString(b[:])
+	}
+
+	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().UnixNano(), requestSeq.Add(1))
+}
+
+func guardianRequest(query string) sdk.GuardianRequest {
+	return sdk.GuardianRequest{
+		ID:          newRequestID("search-guardian"),
+		ToolName:    "search",
+		Action:      sdk.GuardianActionNetwork,
+		Description: "Web search: " + query,
+		Metadata: map[string]any{
+			"operation": "search",
+			"query":     query,
+		},
+	}
+}
+
+func checkGuardian(ctx context.Context, query string) (sdk.GuardianRequest, *sdk.ToolResult) {
+	req := guardianRequest(query)
+
+	g := getGuardian()
+	if g == nil {
+		return req, nil
+	}
+
+	decision, err := g.Decide(ctx, req)
+	if err != nil {
+		return req, &sdk.ToolResult{Content: "guardian: " + err.Error(), IsError: true}
+	}
+
+	switch decision.Action {
+	case sdk.GuardianDecisionAllow:
+		return req, nil
+	case sdk.GuardianDecisionBlock:
+		return req, &sdk.ToolResult{Content: formatGuardianBlock(req, decision), IsError: true}
+	default:
+		decision.Action = sdk.GuardianDecisionBlock
+		if decision.Reason == "" {
+			decision.Reason = "guardian returned unresolved approval decision"
+		}
+
+		return req, &sdk.ToolResult{Content: formatGuardianBlock(req, decision), IsError: true}
+	}
+}
+
+func formatGuardianBlock(req sdk.GuardianRequest, decision sdk.GuardianDecision) string {
+	var b strings.Builder
+
+	b.WriteString("guardian: blocked")
+	b.WriteString("\naction: ")
+	b.WriteString(string(req.Action))
+
+	rule := decision.Profile
+	if rule == "" {
+		rule = decision.MatchedGrantID
+	}
+	if rule == "" {
+		rule = decision.ID
+	}
+	if rule != "" {
+		b.WriteString("\nrule: ")
+		b.WriteString(rule)
+	}
+
+	if decision.Reason != "" {
+		b.WriteString("\nreason: ")
+		b.WriteString(decision.Reason)
+	}
+
+	return b.String()
+}
+
 func (t *searchTool) Execute(ctx context.Context, args map[string]any) (sdk.ToolResult, error) {
 	query, ok := args[paramQuery].(string)
 	if !ok || strings.TrimSpace(query) == "" {
 		return sdk.ToolResult{Content: "error: query is required and must be non-empty", IsError: true}, nil
+	}
+
+	if _, guardianResult := checkGuardian(ctx, query); guardianResult != nil {
+		return *guardianResult, nil
 	}
 
 	maxResults := t.defaultMaxResults
@@ -172,7 +285,7 @@ func (t *searchTool) Execute(ctx context.Context, args map[string]any) (sdk.Tool
 func (t *searchTool) maybeDelaySearch(ctx context.Context) error {
 	for {
 		lastSearchMu.Lock()
-		minGap := time.Duration(500+rand.IntN(1500)) * time.Millisecond
+		minGap := time.Duration(500+mathrand.IntN(1500)) * time.Millisecond
 		readyAt := lastSearchTime.Add(minGap)
 		if searchCooldownUntil.After(readyAt) {
 			readyAt = searchCooldownUntil
@@ -279,7 +392,7 @@ func searchRetryDelay(resp *http.Response, attempt int) time.Duration {
 	}
 
 	delay := time.Second << (attempt - 1)
-	jitter := time.Duration(rand.IntN(500)) * time.Millisecond
+	jitter := time.Duration(mathrand.IntN(500)) * time.Millisecond
 	return min(delay+jitter, searchRetryDelayMax)
 }
 
@@ -340,7 +453,7 @@ func randomUserAgent() string {
 		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 	}
-	return agents[rand.IntN(len(agents))]
+	return agents[mathrand.IntN(len(agents))]
 }
 
 func parseLiteSearchResults(doc *html.Node, maxResults int) []SearchResult {

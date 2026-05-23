@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/weave-agent/weave/sdk"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/html"
@@ -38,6 +40,31 @@ func TestSearchTool_Execute_QueryTypeValidation(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.IsError)
 	assert.Contains(t, result.Content, "query is required")
+}
+
+func TestGuardianRequest(t *testing.T) {
+	req := guardianRequest("golang testing")
+
+	assert.NotEmpty(t, req.ID)
+	assert.True(t, strings.HasPrefix(req.ID, "search-guardian-"))
+	assert.Equal(t, "search", req.ToolName)
+	assert.Equal(t, sdk.GuardianActionNetwork, req.Action)
+	assert.Equal(t, "Web search: golang testing", req.Description)
+	assert.Equal(t, "search", req.Metadata["operation"])
+	assert.Equal(t, "golang testing", req.Metadata["query"])
+}
+
+func TestCheckGuardianNoGuardian(t *testing.T) {
+	origGuardian := getGuardian()
+	setGuardian(nil)
+	t.Cleanup(func() { setGuardian(origGuardian) })
+
+	req, result := checkGuardian(context.Background(), "golang testing")
+
+	require.Nil(t, result)
+	assert.Equal(t, sdk.GuardianActionNetwork, req.Action)
+	assert.Equal(t, "search", req.ToolName)
+	assert.Equal(t, "golang testing", req.Metadata["query"])
 }
 
 func TestCleanDuckDuckGoURL(t *testing.T) {

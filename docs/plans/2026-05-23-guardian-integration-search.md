@@ -28,15 +28,15 @@ Add guardian policy enforcement to the `search` tool so that web search queries 
 ## Implementation Steps
 
 ### Task 1: Add guardian infrastructure to search.go
-- [ ] Add `guardianMu sync.RWMutex`, `guardian sdk.Guardian` package-level variables
-- [ ] Add `setGuardian()` / `getGuardian()` helpers
-- [ ] Add `GuardianRegisteredTopic` listener in `init()` alongside tool registration
-- [ ] Add `newRequestID()` helper
-- [ ] Add `guardianRequest(query string) sdk.GuardianRequest` helper with `Action: sdk.GuardianActionNetwork`
-- [ ] Add `checkGuardian()` helper (same pattern as bash)
-- [ ] Add `formatGuardianBlock()` helper (same as bash)
-- [ ] Call `checkGuardian()` at start of `Execute()`, before search query execution
-- [ ] Run search tests — must pass before next task
+- [x] Add `guardianMu sync.RWMutex`, `guardian sdk.Guardian` package-level variables
+- [x] Add `setGuardian()` / `getGuardian()` helpers
+- [x] Add `GuardianRegisteredTopic` listener in `init()` alongside tool registration
+- [x] Add `newRequestID()` helper
+- [x] Add `guardianRequest(query string) sdk.GuardianRequest` helper with `Action: sdk.GuardianActionNetwork`
+- [x] Add `checkGuardian()` helper (same pattern as bash)
+- [x] Add `formatGuardianBlock()` helper (same as bash)
+- [x] Call `checkGuardian()` at start of `Execute()`, before search query execution
+- [x] Run search tests — must pass before next task
 
 ### Task 2: Add guardian tests to search_test.go
 - [ ] Write `TestExecuteWithGuardian` with subtests:
