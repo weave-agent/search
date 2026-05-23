@@ -56,6 +56,7 @@ func TestGuardianRequest(t *testing.T) {
 
 func TestCheckGuardianNoGuardian(t *testing.T) {
 	origGuardian := getGuardian()
+
 	setGuardian(nil)
 	t.Cleanup(func() { setGuardian(origGuardian) })
 
@@ -118,7 +119,7 @@ func TestExecuteWithGuardian(t *testing.T) {
 			httpClient: &http.Client{
 				Transport: httpRoundTripperFunc{
 					fn: func(_ *http.Request) (*http.Response, error) {
-						*requests = *requests + 1
+						*requests++
 
 						return &http.Response{
 							StatusCode: http.StatusOK,
@@ -134,6 +135,7 @@ func TestExecuteWithGuardian(t *testing.T) {
 		t.Helper()
 
 		origGuardian := getGuardian()
+
 		setGuardian(g)
 		t.Cleanup(func() { setGuardian(origGuardian) })
 	}
@@ -562,18 +564,7 @@ func TestExtractText_NestedElements(t *testing.T) {
 	doc, err := html.Parse(strings.NewReader(htmlDoc))
 	require.NoError(t, err)
 
-	var pNode *html.Node
-	var findP func(*html.Node)
-	findP = func(n *html.Node) {
-		if n.Type == html.ElementNode && n.Data == "p" {
-			pNode = n
-			return
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			findP(c)
-		}
-	}
-	findP(doc)
+	pNode := findFirstElement(doc, "p")
 	require.NotNil(t, pNode)
 
 	text := extractText(pNode)
@@ -590,18 +581,7 @@ func TestGetAttr_Missing(t *testing.T) {
 	doc, err := html.Parse(strings.NewReader(htmlDoc))
 	require.NoError(t, err)
 
-	var divNode *html.Node
-	var findDiv func(*html.Node)
-	findDiv = func(n *html.Node) {
-		if n.Type == html.ElementNode && n.Data == "div" {
-			divNode = n
-			return
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			findDiv(c)
-		}
-	}
-	findDiv(doc)
+	divNode := findFirstElement(doc, "div")
 	require.NotNil(t, divNode)
 
 	assert.Equal(t, "foo", getAttr(divNode, "class"))
@@ -613,24 +593,27 @@ func TestHasClass(t *testing.T) {
 	doc, err := html.Parse(strings.NewReader(htmlDoc))
 	require.NoError(t, err)
 
-	var divNode *html.Node
-	var findDiv func(*html.Node)
-	findDiv = func(n *html.Node) {
-		if n.Type == html.ElementNode && n.Data == "div" {
-			divNode = n
-			return
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			findDiv(c)
-		}
-	}
-	findDiv(doc)
+	divNode := findFirstElement(doc, "div")
 	require.NotNil(t, divNode)
 
 	assert.True(t, hasClass(divNode, "result-link"), "should match exact class")
 	assert.True(t, hasClass(divNode, "extra-class"), "should match second class")
 	assert.False(t, hasClass(divNode, "result-link-extra"), "should not match partial class name")
 	assert.False(t, hasClass(divNode, "link"), "should not match substring")
+}
+
+func findFirstElement(n *html.Node, name string) *html.Node {
+	if n.Type == html.ElementNode && n.Data == name {
+		return n
+	}
+
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if found := findFirstElement(c, name); found != nil {
+			return found
+		}
+	}
+
+	return nil
 }
 
 // httpRoundTripperFunc allows using a function as RoundTripper.
@@ -772,9 +755,11 @@ func TestSearchDuckDuckGo_Success(t *testing.T) {
 
 func TestSearchDuckDuckGo_URLConstruction(t *testing.T) {
 	var capturedURL string
+
 	transport := httpRoundTripperFunc{
 		fn: func(req *http.Request) (*http.Response, error) {
 			capturedURL = req.URL.String()
+
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       io.NopCloser(strings.NewReader("<html><body></body></html>")),
@@ -794,9 +779,11 @@ func TestSearchDuckDuckGo_URLConstruction(t *testing.T) {
 
 func TestSearchDuckDuckGo_SpecialCharactersInQuery(t *testing.T) {
 	var capturedURL string
+
 	transport := httpRoundTripperFunc{
 		fn: func(req *http.Request) (*http.Response, error) {
 			capturedURL = req.URL.String()
+
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       io.NopCloser(strings.NewReader("<html><body></body></html>")),
@@ -815,9 +802,11 @@ func TestSearchDuckDuckGo_SpecialCharactersInQuery(t *testing.T) {
 
 func TestSearchDuckDuckGo_RequestHeadersSet(t *testing.T) {
 	var capturedReq *http.Request
+
 	transport := httpRoundTripperFunc{
 		fn: func(req *http.Request) (*http.Response, error) {
 			capturedReq = req
+
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       io.NopCloser(strings.NewReader("<html><body></body></html>")),
@@ -841,10 +830,15 @@ func TestSearchDuckDuckGo_RequestHeadersSet(t *testing.T) {
 func TestSearchTool_Execute_MaxResultsCap(t *testing.T) {
 	htmlParts := make([]string, 0, 52)
 	htmlParts = append(htmlParts, "<!DOCTYPE html><html><body><table>")
+
 	for i := range 25 {
-		htmlParts = append(htmlParts, fmt.Sprintf(`<tr><td><a class="result-link" href="https://%d.com">%d</a></td></tr>`, i+1, i+1))
-		htmlParts = append(htmlParts, fmt.Sprintf(`<tr><td class="result-snippet">snippet %d</td></tr>`, i+1))
+		htmlParts = append(
+			htmlParts,
+			fmt.Sprintf(`<tr><td><a class="result-link" href="https://%d.com">%d</a></td></tr>`, i+1, i+1),
+			fmt.Sprintf(`<tr><td class="result-snippet">snippet %d</td></tr>`, i+1),
+		)
 	}
+
 	htmlParts = append(htmlParts, "</table></body></html>")
 	htmlBody := strings.Join(htmlParts, "\n")
 
@@ -1375,6 +1369,7 @@ func TestSearchDuckDuckGo_RetryableStatusThenSuccess(t *testing.T) {
 							Body:       io.NopCloser(strings.NewReader("")),
 						}, nil
 					}
+
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(htmlBody)),
@@ -1398,6 +1393,7 @@ func TestSearchDuckDuckGo_RetryableStatusExhausted(t *testing.T) {
 			Transport: httpRoundTripperFunc{
 				fn: func(_ *http.Request) (*http.Response, error) {
 					attempts++
+
 					return &http.Response{
 						StatusCode: http.StatusAccepted,
 						Header:     http.Header{"Retry-After": []string{"0"}},
@@ -1511,6 +1507,7 @@ func TestMaybeDelaySearch_Concurrent(t *testing.T) {
 			_ = (&searchTool{}).maybeDelaySearch(context.Background())
 		})
 	}
+
 	wg.Wait()
 
 	lastSearchMu.Lock()
@@ -1534,6 +1531,6 @@ func TestMaybeDelaySearch_ContextCancellation(t *testing.T) {
 	lastSearchMu.Lock()
 	finalTime := lastSearchTime
 	lastSearchMu.Unlock()
-	// lastSearchTime should NOT be updated when cancelled during delay
+	// lastSearchTime should NOT be updated when canceled during delay
 	assert.Equal(t, originalTime, finalTime)
 }

@@ -9,6 +9,7 @@ import (
 	mathrand "math/rand/v2"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,6 +90,7 @@ func init() {
 		if maxResults <= 0 {
 			maxResults = 10
 		}
+
 		if maxResults > maxResultsCap {
 			maxResults = maxResultsCap
 		}
@@ -146,7 +148,7 @@ func guardianRequest(query string) sdk.GuardianRequest {
 		Description: "Web search: " + query,
 		Metadata: map[string]any{
 			"operation": "search",
-			"query":     query,
+			paramQuery:  query,
 		},
 	}
 }
@@ -190,9 +192,11 @@ func formatGuardianBlock(req sdk.GuardianRequest, decision sdk.GuardianDecision)
 	if rule == "" {
 		rule = decision.MatchedGrantID
 	}
+
 	if rule == "" {
 		rule = decision.ID
 	}
+
 	if rule != "" {
 		b.WriteString("\nrule: ")
 		b.WriteString(rule)
@@ -216,50 +220,7 @@ func (t *searchTool) Execute(ctx context.Context, args map[string]any) (sdk.Tool
 		return *guardianResult, nil
 	}
 
-	maxResults := t.defaultMaxResults
-	if v, ok := args[paramMaxResults]; ok {
-		switch n := v.(type) {
-		case float64:
-			if n > 0 && n <= float64(maxResultsCap) {
-				maxResults = int(n)
-			} else if n > float64(maxResultsCap) {
-				maxResults = maxResultsCap
-			}
-		case int:
-			if n > 0 && n <= maxResultsCap {
-				maxResults = n
-			} else if n > maxResultsCap {
-				maxResults = maxResultsCap
-			}
-		case int64:
-			if n > 0 && n <= int64(maxResultsCap) {
-				maxResults = int(n)
-			} else if n > int64(maxResultsCap) {
-				maxResults = maxResultsCap
-			}
-		case uint:
-			if n > 0 && n <= uint(maxResultsCap) {
-				maxResults = int(n)
-			} else if n > uint(maxResultsCap) {
-				maxResults = maxResultsCap
-			}
-		case uint64:
-			if n > 0 && n <= uint64(maxResultsCap) {
-				maxResults = int(n)
-			} else if n > uint64(maxResultsCap) {
-				maxResults = maxResultsCap
-			}
-		case string:
-			if parsed, err := strconv.Atoi(n); err == nil && parsed > 0 && parsed <= maxResultsCap {
-				maxResults = parsed
-			} else if err == nil && parsed > maxResultsCap {
-				maxResults = maxResultsCap
-			}
-		}
-	}
-	if maxResults > maxResultsCap {
-		maxResults = maxResultsCap
-	}
+	maxResults := parseMaxResults(args[paramMaxResults], t.defaultMaxResults)
 
 	if err := t.maybeDelaySearch(ctx); err != nil {
 		return sdk.ToolResult{Content: fmt.Sprintf("error: %s", err), IsError: true}, nil
@@ -282,20 +243,69 @@ func (t *searchTool) Execute(ctx context.Context, args map[string]any) (sdk.Tool
 	return sdk.ToolResult{Content: strings.Join(lines, "\n\n"), IsError: false}, nil
 }
 
+func parseMaxResults(value any, defaultMaxResults int) int {
+	maxResults := capMaxResults(defaultMaxResults)
+
+	switch n := value.(type) {
+	case float64:
+		maxResults = capPositiveMaxResults(int(n), maxResults)
+	case int:
+		maxResults = capPositiveMaxResults(n, maxResults)
+	case int64:
+		maxResults = capPositiveMaxResults(int(n), maxResults)
+	case uint:
+		maxResults = capPositiveMaxResults(int(n), maxResults)
+	case uint64:
+		if n > uint64(maxResultsCap) {
+			maxResults = maxResultsCap
+		} else {
+			maxResults = capPositiveMaxResults(int(n), maxResults)
+		}
+	case string:
+		parsed, err := strconv.Atoi(n)
+		if err == nil {
+			maxResults = capPositiveMaxResults(parsed, maxResults)
+		}
+	}
+
+	return maxResults
+}
+
+func capPositiveMaxResults(value, fallback int) int {
+	if value <= 0 {
+		return fallback
+	}
+
+	return capMaxResults(value)
+}
+
+func capMaxResults(value int) int {
+	if value > maxResultsCap {
+		return maxResultsCap
+	}
+
+	return value
+}
+
 func (t *searchTool) maybeDelaySearch(ctx context.Context) error {
 	for {
 		lastSearchMu.Lock()
-		minGap := time.Duration(500+mathrand.IntN(1500)) * time.Millisecond
+		minGap := time.Duration(500+mathrand.IntN(1500)) * time.Millisecond //nolint:gosec // Jitter spacing is not security-sensitive.
 		readyAt := lastSearchTime.Add(minGap)
+
 		if searchCooldownUntil.After(readyAt) {
 			readyAt = searchCooldownUntil
 		}
+
 		now := time.Now()
+
 		if !now.Before(readyAt) {
 			lastSearchTime = now
 			lastSearchMu.Unlock()
+
 			return nil
 		}
+
 		remaining := readyAt.Sub(now)
 		lastSearchMu.Unlock()
 
@@ -309,13 +319,15 @@ func (t *searchTool) maybeDelaySearch(ctx context.Context) error {
 				default:
 				}
 			}
-			return ctx.Err()
+
+			return fmt.Errorf("context done while waiting to search: %w", ctx.Err())
 		}
 	}
 }
 
 func (t *searchTool) searchDuckDuckGo(ctx context.Context, query string, maxResults int) ([]SearchResult, error) {
 	searchURL := "https://lite.duckduckgo.com/lite/?q=" + url.QueryEscape(query)
+
 	var lastStatus int
 
 	for attempt := 1; attempt <= searchMaxAttempts; attempt++ {
@@ -326,9 +338,14 @@ func (t *searchTool) searchDuckDuckGo(ctx context.Context, query string, maxResu
 
 		if resp.StatusCode == http.StatusOK {
 			doc, err := html.Parse(io.LimitReader(resp.Body, maxBodySize))
-			resp.Body.Close()
+			closeErr := resp.Body.Close()
+
 			if err != nil {
 				return nil, fmt.Errorf("parse html: %w", err)
+			}
+
+			if closeErr != nil {
+				return nil, fmt.Errorf("close response body: %w", closeErr)
 			}
 
 			return parseLiteSearchResults(doc, maxResults), nil
@@ -336,16 +353,21 @@ func (t *searchTool) searchDuckDuckGo(ctx context.Context, query string, maxResu
 
 		lastStatus = resp.StatusCode
 		delay := searchRetryDelay(resp, attempt)
-		resp.Body.Close()
+
+		if err := resp.Body.Close(); err != nil {
+			return nil, fmt.Errorf("close response body: %w", err)
+		}
 
 		if !isRetryableSearchStatus(lastStatus) {
 			return nil, fmt.Errorf("unexpected status code: %d", lastStatus)
 		}
+
 		if attempt == searchMaxAttempts {
 			break
 		}
 
 		recordSearchCooldown(delay)
+
 		if err := waitForSearchRetry(ctx, delay); err != nil {
 			return nil, err
 		}
@@ -368,6 +390,7 @@ func (t *searchTool) requestDuckDuckGo(ctx context.Context, searchURL string) (*
 	if err != nil {
 		return nil, fmt.Errorf("http request: %w", err)
 	}
+
 	return resp, nil
 }
 
@@ -392,7 +415,8 @@ func searchRetryDelay(resp *http.Response, attempt int) time.Duration {
 	}
 
 	delay := time.Second << (attempt - 1)
-	jitter := time.Duration(mathrand.IntN(500)) * time.Millisecond
+	jitter := time.Duration(mathrand.IntN(500)) * time.Millisecond //nolint:gosec // Retry jitter is not security-sensitive.
+
 	return min(delay+jitter, searchRetryDelayMax)
 }
 
@@ -411,9 +435,11 @@ func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
 	if err != nil {
 		return 0, false
 	}
+
 	if retryAt.Before(now) {
 		return 0, true
 	}
+
 	return retryAt.Sub(now), true
 }
 
@@ -443,7 +469,7 @@ func waitForSearchRetry(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return fmt.Errorf("context done while waiting to retry search: %w", ctx.Err())
 	}
 }
 
@@ -453,67 +479,85 @@ func randomUserAgent() string {
 		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 	}
-	return agents[mathrand.IntN(len(agents))]
+
+	return agents[mathrand.IntN(len(agents))] //nolint:gosec // Rotating common user agents is not security-sensitive.
 }
 
 func parseLiteSearchResults(doc *html.Node, maxResults int) []SearchResult {
 	var results []SearchResult
+
 	var current *SearchResult
 
 	var f func(*html.Node)
+
 	f = func(n *html.Node) {
 		if len(results) >= maxResults {
 			return
 		}
 
-		if n.Type == html.ElementNode {
-			switch {
-			case hasClass(n, "result-link"):
-				current = &SearchResult{Position: len(results) + 1}
-				title := extractText(n)
-				if title != "" {
-					current.Title = title
-				}
-				href := getAttr(n, "href")
-				if href != "" {
-					current.Link = cleanDuckDuckGoURL(href)
+		if n.Type != html.ElementNode {
+			walkSearchChildren(n, f, &results, maxResults)
+
+			return
+		}
+
+		switch {
+		case hasClass(n, "result-link"):
+			current = parseSearchResultLink(n, len(results)+1)
+		case hasClass(n, "result-snippet"):
+			snippet := extractText(n)
+			if snippet != "" {
+				if current == nil {
+					current = &SearchResult{Position: len(results) + 1}
 				}
 
-			case hasClass(n, "result-snippet"):
-				snippet := extractText(n)
-				if snippet != "" {
-					if current == nil {
-						current = &SearchResult{Position: len(results) + 1}
-					}
-					current.Snippet = snippet
-					results = append(results, *current)
-					current = nil
-				}
+				current.Snippet = snippet
+				results = append(results, *current)
+				current = nil
 			}
 		}
 
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
-			if len(results) >= maxResults {
-				return
-			}
-		}
+		walkSearchChildren(n, f, &results, maxResults)
 	}
 
 	f(doc)
+
 	return results
+}
+
+func parseSearchResultLink(n *html.Node, position int) *SearchResult {
+	result := &SearchResult{Position: position}
+
+	title := extractText(n)
+	if title != "" {
+		result.Title = title
+	}
+
+	href := getAttr(n, "href")
+	if href != "" {
+		result.Link = cleanDuckDuckGoURL(href)
+	}
+
+	return result
+}
+
+func walkSearchChildren(n *html.Node, visit func(*html.Node), results *[]SearchResult, maxResults int) {
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		visit(c)
+
+		if len(*results) >= maxResults {
+			return
+		}
+	}
 }
 
 func hasClass(n *html.Node, class string) bool {
 	for _, attr := range n.Attr {
 		if attr.Key == "class" {
-			for _, c := range strings.Fields(attr.Val) {
-				if c == class {
-					return true
-				}
-			}
+			return slices.Contains(strings.Fields(attr.Val), class)
 		}
 	}
+
 	return false
 }
 
@@ -523,6 +567,7 @@ func getAttr(n *html.Node, key string) string {
 			return attr.Val
 		}
 	}
+
 	return ""
 }
 
@@ -532,16 +577,21 @@ func extractText(n *html.Node) string {
 	}
 
 	var b strings.Builder
+
 	var f func(*html.Node)
+
 	f = func(n *html.Node) {
 		if n.Type == html.TextNode {
 			b.WriteString(n.Data)
 		}
+
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			f(c)
 		}
 	}
+
 	f(n)
+
 	return strings.TrimSpace(b.String())
 }
 
@@ -553,6 +603,7 @@ func cleanDuckDuckGoURL(rawURL string) string {
 
 	isDDG := (parsed.Host == "duckduckgo.com" || strings.HasSuffix(parsed.Host, ".duckduckgo.com")) && parsed.Path == "/l/"
 	isRelative := parsed.Host == "" && parsed.Path == "/l/"
+
 	if !isDDG && !isRelative {
 		return rawURL
 	}

@@ -48,9 +48,9 @@ Add guardian policy enforcement to the `search` tool so that web search queries 
 - [x] Run search tests — must pass
 
 ### Task 3: Verify and cleanup
-- [ ] Run `make lint` in search extension directory
-- [ ] Run full test suite for search extension
-- [ ] Verify no regressions in existing search functionality
+- [x] Run `make lint` in search extension directory (`make lint` unavailable; ran `golangci-lint run ./...`)
+- [x] Run full test suite for search extension
+- [x] Verify no regressions in existing search functionality
 
 ## Technical Details
 
