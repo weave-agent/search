@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	weavebus "github.com/weave-agent/weave/bus"
 	"github.com/weave-agent/weave/sdk"
 
 	"github.com/stretchr/testify/assert"
@@ -60,25 +61,24 @@ func TestCheckGuardianNoGuardian(t *testing.T) {
 	setGuardian(nil)
 	t.Cleanup(func() { setGuardian(origGuardian) })
 
-	req, result := checkGuardian(context.Background(), "golang testing")
+	result := checkGuardian(context.Background(), "golang testing")
 
 	require.Nil(t, result)
+
+	req := guardianRequest("golang testing")
 	assert.Equal(t, sdk.GuardianActionNetwork, req.Action)
 	assert.Equal(t, "search", req.ToolName)
 	assert.Equal(t, "golang testing", req.Metadata["query"])
 }
 
 type testGuardian struct {
-	mu       sync.Mutex
 	decision sdk.GuardianDecision
 	err      error
 	requests []sdk.GuardianRequest
 }
 
 func (g *testGuardian) Decide(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
-	g.mu.Lock()
 	g.requests = append(g.requests, req)
-	g.mu.Unlock()
 
 	return g.decision, g.err
 }
@@ -89,13 +89,6 @@ func (g *testGuardian) Resolve(context.Context, string, sdk.GuardianResolution) 
 
 func (g *testGuardian) Snapshot(context.Context) (sdk.GuardianSnapshot, error) {
 	return sdk.GuardianSnapshot{}, nil
-}
-
-func (g *testGuardian) Requests() []sdk.GuardianRequest {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	return append([]sdk.GuardianRequest(nil), g.requests...)
 }
 
 func TestExecuteWithGuardian(t *testing.T) {
@@ -157,11 +150,10 @@ func TestExecuteWithGuardian(t *testing.T) {
 		assert.Contains(t, result.Content, "1. Example")
 		assert.Equal(t, 1, httpRequests)
 
-		requests := g.Requests()
-		require.Len(t, requests, 1)
-		assert.Equal(t, sdk.GuardianActionNetwork, requests[0].Action)
-		assert.Equal(t, "search", requests[0].ToolName)
-		assert.Equal(t, "golang testing", requests[0].Metadata["query"])
+		require.Len(t, g.requests, 1)
+		assert.Equal(t, sdk.GuardianActionNetwork, g.requests[0].Action)
+		assert.Equal(t, "search", g.requests[0].ToolName)
+		assert.Equal(t, "golang testing", g.requests[0].Metadata["query"])
 	})
 
 	t.Run("block decision returns guardian error", func(t *testing.T) {
@@ -187,9 +179,33 @@ func TestExecuteWithGuardian(t *testing.T) {
 		assert.Contains(t, result.Content, "reason: network search denied")
 		assert.Equal(t, 0, httpRequests)
 
-		requests := g.Requests()
-		require.Len(t, requests, 1)
-		assert.Equal(t, "restricted", requests[0].Metadata["query"])
+		require.Len(t, g.requests, 1)
+		assert.Equal(t, "restricted", g.requests[0].Metadata["query"])
+	})
+
+	t.Run("ask decision returns unresolved guardian error", func(t *testing.T) {
+		g := &testGuardian{
+			decision: sdk.GuardianDecision{
+				ID:     "decision-ask",
+				Action: sdk.GuardianDecisionAsk,
+			},
+		}
+		withGuardian(t, g)
+
+		httpRequests := 0
+		tool := newTool(t, &httpRequests)
+
+		result, err := tool.Execute(t.Context(), map[string]any{"query": "approval needed"})
+		require.NoError(t, err)
+		assert.True(t, result.IsError)
+		assert.Contains(t, result.Content, "guardian: blocked")
+		assert.Contains(t, result.Content, "action: network")
+		assert.Contains(t, result.Content, "rule: decision-ask")
+		assert.Contains(t, result.Content, "reason: guardian returned unresolved approval decision")
+		assert.Equal(t, 0, httpRequests)
+
+		require.Len(t, g.requests, 1)
+		assert.Equal(t, "approval needed", g.requests[0].Metadata["query"])
 	})
 
 	t.Run("missing guardian permits search", func(t *testing.T) {
@@ -218,10 +234,57 @@ func TestExecuteWithGuardian(t *testing.T) {
 		assert.Equal(t, "guardian: guardian unavailable", result.Content)
 		assert.Equal(t, 0, httpRequests)
 
-		requests := g.Requests()
-		require.Len(t, requests, 1)
-		assert.Equal(t, sdk.GuardianActionNetwork, requests[0].Action)
+		require.Len(t, g.requests, 1)
+		assert.Equal(t, sdk.GuardianActionNetwork, g.requests[0].Action)
 	})
+}
+
+func TestGuardianRegisteredTopicConfiguresGuardian(t *testing.T) {
+	origGuardian := getGuardian()
+
+	setGuardian(nil)
+	t.Cleanup(func() { setGuardian(origGuardian) })
+
+	g := &testGuardian{
+		decision: sdk.GuardianDecision{
+			Action:  sdk.GuardianDecisionBlock,
+			Profile: "registered-profile",
+			Reason:  "registered guardian blocked search",
+		},
+	}
+
+	b := weavebus.New()
+
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+
+	sdk.InvokeBusSubscribers(b)
+	b.Publish(sdk.NewEvent(sdk.GuardianRegisteredTopic, g))
+	require.Eventually(t, func() bool { return getGuardian() == g }, time.Second, 10*time.Millisecond)
+
+	httpRequests := 0
+	tool := &searchTool{
+		defaultMaxResults: 10,
+		httpClient: &http.Client{
+			Transport: httpRoundTripperFunc{
+				fn: func(_ *http.Request) (*http.Response, error) {
+					httpRequests++
+
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(makeSearchResultsHTML(1))),
+					}, nil
+				},
+			},
+		},
+	}
+
+	result, err := tool.Execute(t.Context(), map[string]any{"query": "registered guardian"})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Content, "rule: registered-profile")
+	assert.Equal(t, 0, httpRequests)
+	require.Len(t, g.requests, 1)
+	assert.Equal(t, "registered guardian", g.requests[0].Metadata["query"])
 }
 
 func TestCleanDuckDuckGoURL(t *testing.T) {
@@ -632,11 +695,36 @@ func resetSearchTiming() {
 	lastSearchMu.Unlock()
 }
 
+func makeSearchResultsHTML(count int) string {
+	parts := make([]string, 0, (count*2)+2)
+	parts = append(parts, "<!DOCTYPE html><html><body><table>")
+
+	for i := 1; i <= count; i++ {
+		parts = append(
+			parts,
+			fmt.Sprintf(`<tr><td><a class="result-link" href="https://%d.com">%d</a></td></tr>`, i, i),
+			fmt.Sprintf(`<tr><td class="result-snippet">snippet %d</td></tr>`, i),
+		)
+	}
+
+	parts = append(parts, "</table></body></html>")
+
+	return strings.Join(parts, "\n")
+}
+
 // errorReader is an io.Reader that always returns an error.
 type errorReader struct{}
 
 func (errorReader) Read(_ []byte) (int, error) {
 	return 0, errors.New("read error")
+}
+
+type closeErrorReadCloser struct {
+	io.Reader
+}
+
+func (closeErrorReadCloser) Close() error {
+	return errors.New("close failed")
 }
 
 func TestSearchDuckDuckGo_Non200Status(t *testing.T) {
@@ -657,6 +745,26 @@ func TestSearchDuckDuckGo_Non200Status(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, results)
 	assert.Contains(t, err.Error(), "unexpected status code: 403")
+}
+
+func TestSearchDuckDuckGo_Non200CloseFailure(t *testing.T) {
+	tool := &searchTool{
+		httpClient: &http.Client{
+			Transport: httpRoundTripperFunc{
+				fn: func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusForbidden,
+						Body:       closeErrorReadCloser{Reader: strings.NewReader("")},
+					}, nil
+				},
+			},
+		},
+	}
+
+	results, err := tool.searchDuckDuckGo(context.Background(), "test", 10)
+	require.Error(t, err)
+	assert.Nil(t, results)
+	assert.Contains(t, err.Error(), "close response body: close failed")
 }
 
 func TestSearchDuckDuckGo_NonRetryableStatusCodes(t *testing.T) {
@@ -751,6 +859,37 @@ func TestSearchDuckDuckGo_Success(t *testing.T) {
 	assert.Equal(t, "Example", results[0].Title)
 	assert.Equal(t, "https://example.com", results[0].Link)
 	assert.Equal(t, "A snippet.", results[0].Snippet)
+}
+
+func TestSearchDuckDuckGo_SuccessCloseFailure(t *testing.T) {
+	htmlBody := `
+<!DOCTYPE html>
+<html>
+<body>
+<table>
+<tr><td><a class="result-link" href="https://example.com">Example</a></td></tr>
+<tr><td class="result-snippet">A snippet.</td></tr>
+</table>
+</body>
+</html>
+`
+	tool := &searchTool{
+		httpClient: &http.Client{
+			Transport: httpRoundTripperFunc{
+				fn: func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       closeErrorReadCloser{Reader: strings.NewReader(htmlBody)},
+					}, nil
+				},
+			},
+		},
+	}
+
+	results, err := tool.searchDuckDuckGo(context.Background(), "test", 10)
+	require.Error(t, err)
+	assert.Nil(t, results)
+	assert.Contains(t, err.Error(), "close response body: close failed")
 }
 
 func TestSearchDuckDuckGo_URLConstruction(t *testing.T) {
@@ -977,15 +1116,7 @@ func TestSearchTool_Execute_MaxResultsFromArgs(t *testing.T) {
 }
 
 func TestSearchTool_Execute_MaxResultsIntType(t *testing.T) {
-	htmlBody := `
-<!DOCTYPE html>
-<html><body>
-<table>
-<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
-<tr><td class="result-snippet">Snippet</td></tr>
-</table>
-</body></html>
-`
+	htmlBody := makeSearchResultsHTML(3)
 	tool := &searchTool{
 		defaultMaxResults: 10,
 		httpClient: &http.Client{
@@ -1003,21 +1134,14 @@ func TestSearchTool_Execute_MaxResultsIntType(t *testing.T) {
 	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": int(1)})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
-	assert.Contains(t, result.Content, "1. Title")
+	assert.Contains(t, result.Content, "1. 1")
+	assert.NotContains(t, result.Content, "2. 2")
 }
 
 func TestSearchTool_Execute_MaxResultsZero(t *testing.T) {
-	htmlBody := `
-<!DOCTYPE html>
-<html><body>
-<table>
-<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
-<tr><td class="result-snippet">Snippet</td></tr>
-</table>
-</body></html>
-`
+	htmlBody := makeSearchResultsHTML(3)
 	tool := &searchTool{
-		defaultMaxResults: 10,
+		defaultMaxResults: 2,
 		httpClient: &http.Client{
 			Transport: httpRoundTripperFunc{
 				fn: func(_ *http.Request) (*http.Response, error) {
@@ -1034,27 +1158,21 @@ func TestSearchTool_Execute_MaxResultsZero(t *testing.T) {
 	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": 0})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
-	assert.Contains(t, result.Content, "1. Title")
+	assert.Contains(t, result.Content, "2. 2")
+	assert.NotContains(t, result.Content, "3. 3")
 
 	// Zero max_results (float64) should also use default
 	result, err = tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": 0.0})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
-	assert.Contains(t, result.Content, "1. Title")
+	assert.Contains(t, result.Content, "2. 2")
+	assert.NotContains(t, result.Content, "3. 3")
 }
 
 func TestSearchTool_Execute_NonIntMaxResults(t *testing.T) {
-	htmlBody := `
-<!DOCTYPE html>
-<html><body>
-<table>
-<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
-<tr><td class="result-snippet">Snippet</td></tr>
-</table>
-</body></html>
-`
+	htmlBody := makeSearchResultsHTML(3)
 	tool := &searchTool{
-		defaultMaxResults: 10,
+		defaultMaxResults: 2,
 		httpClient: &http.Client{
 			Transport: httpRoundTripperFunc{
 				fn: func(_ *http.Request) (*http.Response, error) {
@@ -1070,19 +1188,12 @@ func TestSearchTool_Execute_NonIntMaxResults(t *testing.T) {
 	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": -1.0})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
-	assert.Contains(t, result.Content, "1. Title")
+	assert.Contains(t, result.Content, "2. 2")
+	assert.NotContains(t, result.Content, "3. 3")
 }
 
 func TestSearchTool_Execute_MaxResultsInt64(t *testing.T) {
-	htmlBody := `
-<!DOCTYPE html>
-<html><body>
-<table>
-<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
-<tr><td class="result-snippet">Snippet</td></tr>
-</table>
-</body></html>
-`
+	htmlBody := makeSearchResultsHTML(3)
 	tool := &searchTool{
 		defaultMaxResults: 10,
 		httpClient: &http.Client{
@@ -1100,19 +1211,12 @@ func TestSearchTool_Execute_MaxResultsInt64(t *testing.T) {
 	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": int64(1)})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
-	assert.Contains(t, result.Content, "1. Title")
+	assert.Contains(t, result.Content, "1. 1")
+	assert.NotContains(t, result.Content, "2. 2")
 }
 
 func TestSearchTool_Execute_MaxResultsInt64OverCap(t *testing.T) {
-	htmlBody := `
-<!DOCTYPE html>
-<html><body>
-<table>
-<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
-<tr><td class="result-snippet">Snippet</td></tr>
-</table>
-</body></html>
-`
+	htmlBody := makeSearchResultsHTML(21)
 	tool := &searchTool{
 		defaultMaxResults: 10,
 		httpClient: &http.Client{
@@ -1130,19 +1234,12 @@ func TestSearchTool_Execute_MaxResultsInt64OverCap(t *testing.T) {
 	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": int64(100)})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
-	assert.Contains(t, result.Content, "1. Title")
+	assert.Contains(t, result.Content, "20. 20")
+	assert.NotContains(t, result.Content, "21. 21")
 }
 
 func TestSearchTool_Execute_MaxResultsUint(t *testing.T) {
-	htmlBody := `
-<!DOCTYPE html>
-<html><body>
-<table>
-<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
-<tr><td class="result-snippet">Snippet</td></tr>
-</table>
-</body></html>
-`
+	htmlBody := makeSearchResultsHTML(3)
 	tool := &searchTool{
 		defaultMaxResults: 10,
 		httpClient: &http.Client{
@@ -1160,19 +1257,12 @@ func TestSearchTool_Execute_MaxResultsUint(t *testing.T) {
 	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": uint(1)})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
-	assert.Contains(t, result.Content, "1. Title")
+	assert.Contains(t, result.Content, "1. 1")
+	assert.NotContains(t, result.Content, "2. 2")
 }
 
 func TestSearchTool_Execute_MaxResultsUint64(t *testing.T) {
-	htmlBody := `
-<!DOCTYPE html>
-<html><body>
-<table>
-<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
-<tr><td class="result-snippet">Snippet</td></tr>
-</table>
-</body></html>
-`
+	htmlBody := makeSearchResultsHTML(3)
 	tool := &searchTool{
 		defaultMaxResults: 10,
 		httpClient: &http.Client{
@@ -1190,19 +1280,12 @@ func TestSearchTool_Execute_MaxResultsUint64(t *testing.T) {
 	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": uint64(1)})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
-	assert.Contains(t, result.Content, "1. Title")
+	assert.Contains(t, result.Content, "1. 1")
+	assert.NotContains(t, result.Content, "2. 2")
 }
 
 func TestSearchTool_Execute_MaxResultsString(t *testing.T) {
-	htmlBody := `
-<!DOCTYPE html>
-<html><body>
-<table>
-<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
-<tr><td class="result-snippet">Snippet</td></tr>
-</table>
-</body></html>
-`
+	htmlBody := makeSearchResultsHTML(3)
 	tool := &searchTool{
 		defaultMaxResults: 10,
 		httpClient: &http.Client{
@@ -1220,19 +1303,12 @@ func TestSearchTool_Execute_MaxResultsString(t *testing.T) {
 	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": "1"})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
-	assert.Contains(t, result.Content, "1. Title")
+	assert.Contains(t, result.Content, "1. 1")
+	assert.NotContains(t, result.Content, "2. 2")
 }
 
 func TestSearchTool_Execute_MaxResultsStringOverCap(t *testing.T) {
-	htmlBody := `
-<!DOCTYPE html>
-<html><body>
-<table>
-<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
-<tr><td class="result-snippet">Snippet</td></tr>
-</table>
-</body></html>
-`
+	htmlBody := makeSearchResultsHTML(21)
 	tool := &searchTool{
 		defaultMaxResults: 10,
 		httpClient: &http.Client{
@@ -1250,19 +1326,12 @@ func TestSearchTool_Execute_MaxResultsStringOverCap(t *testing.T) {
 	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": "100"})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
-	assert.Contains(t, result.Content, "1. Title")
+	assert.Contains(t, result.Content, "20. 20")
+	assert.NotContains(t, result.Content, "21. 21")
 }
 
 func TestSearchTool_Execute_FloatMaxResults(t *testing.T) {
-	htmlBody := `
-<!DOCTYPE html>
-<html><body>
-<table>
-<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
-<tr><td class="result-snippet">Snippet</td></tr>
-</table>
-</body></html>
-`
+	htmlBody := makeSearchResultsHTML(3)
 	tool := &searchTool{
 		defaultMaxResults: 10,
 		httpClient: &http.Client{
@@ -1280,19 +1349,12 @@ func TestSearchTool_Execute_FloatMaxResults(t *testing.T) {
 	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": 1.0})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
-	assert.Contains(t, result.Content, "1. Title")
+	assert.Contains(t, result.Content, "1. 1")
+	assert.NotContains(t, result.Content, "2. 2")
 }
 
 func TestSearchTool_Execute_LargeMaxResults(t *testing.T) {
-	htmlBody := `
-<!DOCTYPE html>
-<html><body>
-<table>
-<tr><td><a class="result-link" href="https://example.com">Title</a></td></tr>
-<tr><td class="result-snippet">Snippet</td></tr>
-</table>
-</body></html>
-`
+	htmlBody := makeSearchResultsHTML(21)
 	tool := &searchTool{
 		defaultMaxResults: 10,
 		httpClient: &http.Client{
@@ -1310,7 +1372,8 @@ func TestSearchTool_Execute_LargeMaxResults(t *testing.T) {
 	result, err := tool.Execute(t.Context(), map[string]any{"query": "test", "max_results": 100.0})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
-	assert.Contains(t, result.Content, "1. Title")
+	assert.Contains(t, result.Content, "20. 20")
+	assert.NotContains(t, result.Content, "21. 21")
 }
 
 func TestSearchTool_Execute_ResultsFormatting(t *testing.T) {

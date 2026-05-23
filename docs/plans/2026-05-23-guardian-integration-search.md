@@ -1,5 +1,9 @@
 # Guardian Integration for search Tool
 
+**Status:** Complete
+
+All implementation, test, and verification tasks are complete. Manual profile verification remains deferred unless performed in a live weave environment.
+
 ## Overview
 Add guardian policy enforcement to the `search` tool so that web search queries are subject to the guardian's allow/ask/block decisions. The `search` tool makes HTTP requests to DuckDuckGo — this is a `GuardianActionNetwork` action.
 

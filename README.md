@@ -32,6 +32,10 @@ Parameters:
 
 Returns numbered search results with title, URL, and snippet.
 
+## Guardian Enforcement
+
+Before making a DuckDuckGo request, `search` submits the query as a `GuardianActionNetwork` action. If guardian blocks the request, the tool returns a `guardian: blocked` error and does not make the HTTP request. If no guardian is registered, searches run normally.
+
 ## Development
 
 ```bash

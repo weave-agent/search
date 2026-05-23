@@ -2,8 +2,6 @@ package search
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"io"
 	mathrand "math/rand/v2"
@@ -132,12 +130,7 @@ func (t *searchTool) Definition() sdk.ToolDef {
 }
 
 func newRequestID(prefix string) string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err == nil {
-		return prefix + "-" + hex.EncodeToString(b[:])
-	}
-
-	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().UnixNano(), requestSeq.Add(1))
+	return fmt.Sprintf("%s-%d", prefix, requestSeq.Add(1))
 }
 
 func guardianRequest(query string) sdk.GuardianRequest {
@@ -153,31 +146,31 @@ func guardianRequest(query string) sdk.GuardianRequest {
 	}
 }
 
-func checkGuardian(ctx context.Context, query string) (sdk.GuardianRequest, *sdk.ToolResult) {
+func checkGuardian(ctx context.Context, query string) *sdk.ToolResult {
 	req := guardianRequest(query)
 
 	g := getGuardian()
 	if g == nil {
-		return req, nil
+		return nil
 	}
 
 	decision, err := g.Decide(ctx, req)
 	if err != nil {
-		return req, &sdk.ToolResult{Content: "guardian: " + err.Error(), IsError: true}
+		return &sdk.ToolResult{Content: "guardian: " + err.Error(), IsError: true}
 	}
 
 	switch decision.Action {
 	case sdk.GuardianDecisionAllow:
-		return req, nil
+		return nil
 	case sdk.GuardianDecisionBlock:
-		return req, &sdk.ToolResult{Content: formatGuardianBlock(req, decision), IsError: true}
+		return &sdk.ToolResult{Content: formatGuardianBlock(req, decision), IsError: true}
 	default:
 		decision.Action = sdk.GuardianDecisionBlock
 		if decision.Reason == "" {
 			decision.Reason = "guardian returned unresolved approval decision"
 		}
 
-		return req, &sdk.ToolResult{Content: formatGuardianBlock(req, decision), IsError: true}
+		return &sdk.ToolResult{Content: formatGuardianBlock(req, decision), IsError: true}
 	}
 }
 
@@ -216,7 +209,7 @@ func (t *searchTool) Execute(ctx context.Context, args map[string]any) (sdk.Tool
 		return sdk.ToolResult{Content: "error: query is required and must be non-empty", IsError: true}, nil
 	}
 
-	if _, guardianResult := checkGuardian(ctx, query); guardianResult != nil {
+	if guardianResult := checkGuardian(ctx, query); guardianResult != nil {
 		return *guardianResult, nil
 	}
 
@@ -244,47 +237,51 @@ func (t *searchTool) Execute(ctx context.Context, args map[string]any) (sdk.Tool
 }
 
 func parseMaxResults(value any, defaultMaxResults int) int {
-	maxResults := capMaxResults(defaultMaxResults)
+	clampPositive := func(n, fallback int) int {
+		if n <= 0 {
+			return fallback
+		}
+
+		if n > maxResultsCap {
+			return maxResultsCap
+		}
+
+		return n
+	}
+
+	maxResults := clampPositive(defaultMaxResults, 10)
 
 	switch n := value.(type) {
 	case float64:
-		maxResults = capPositiveMaxResults(int(n), maxResults)
+		maxResults = clampPositive(int(n), maxResults)
 	case int:
-		maxResults = capPositiveMaxResults(n, maxResults)
+		maxResults = clampPositive(n, maxResults)
 	case int64:
-		maxResults = capPositiveMaxResults(int(n), maxResults)
+		if n > int64(maxResultsCap) {
+			maxResults = maxResultsCap
+		} else {
+			maxResults = clampPositive(int(n), maxResults)
+		}
 	case uint:
-		maxResults = capPositiveMaxResults(int(n), maxResults)
+		if n > uint(maxResultsCap) {
+			maxResults = maxResultsCap
+		} else {
+			maxResults = clampPositive(int(n), maxResults)
+		}
 	case uint64:
 		if n > uint64(maxResultsCap) {
 			maxResults = maxResultsCap
 		} else {
-			maxResults = capPositiveMaxResults(int(n), maxResults)
+			maxResults = clampPositive(int(n), maxResults)
 		}
 	case string:
 		parsed, err := strconv.Atoi(n)
 		if err == nil {
-			maxResults = capPositiveMaxResults(parsed, maxResults)
+			maxResults = clampPositive(parsed, maxResults)
 		}
 	}
 
 	return maxResults
-}
-
-func capPositiveMaxResults(value, fallback int) int {
-	if value <= 0 {
-		return fallback
-	}
-
-	return capMaxResults(value)
-}
-
-func capMaxResults(value int) int {
-	if value > maxResultsCap {
-		return maxResultsCap
-	}
-
-	return value
 }
 
 func (t *searchTool) maybeDelaySearch(ctx context.Context) error {
@@ -495,29 +492,31 @@ func parseLiteSearchResults(doc *html.Node, maxResults int) []SearchResult {
 			return
 		}
 
-		if n.Type != html.ElementNode {
-			walkSearchChildren(n, f, &results, maxResults)
+		if n.Type == html.ElementNode {
+			switch {
+			case hasClass(n, "result-link"):
+				current = parseSearchResultLink(n, len(results)+1)
+			case hasClass(n, "result-snippet"):
+				snippet := extractText(n)
+				if snippet != "" {
+					if current == nil {
+						current = &SearchResult{Position: len(results) + 1}
+					}
 
-			return
-		}
-
-		switch {
-		case hasClass(n, "result-link"):
-			current = parseSearchResultLink(n, len(results)+1)
-		case hasClass(n, "result-snippet"):
-			snippet := extractText(n)
-			if snippet != "" {
-				if current == nil {
-					current = &SearchResult{Position: len(results) + 1}
+					current.Snippet = snippet
+					results = append(results, *current)
+					current = nil
 				}
-
-				current.Snippet = snippet
-				results = append(results, *current)
-				current = nil
 			}
 		}
 
-		walkSearchChildren(n, f, &results, maxResults)
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			f(c)
+
+			if len(results) >= maxResults {
+				return
+			}
+		}
 	}
 
 	f(doc)
@@ -539,16 +538,6 @@ func parseSearchResultLink(n *html.Node, position int) *SearchResult {
 	}
 
 	return result
-}
-
-func walkSearchChildren(n *html.Node, visit func(*html.Node), results *[]SearchResult, maxResults int) {
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		visit(c)
-
-		if len(*results) >= maxResults {
-			return
-		}
-	}
 }
 
 func hasClass(n *html.Node, class string) bool {

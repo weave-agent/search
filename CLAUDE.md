@@ -33,6 +33,12 @@ DDG redirect URLs look like `//duckduckgo.com/l/?uddg=<encoded-url>`. Extract an
 
 A random 500ms–2s delay between searches, protected by `sync.Mutex`. This is in `maybeDelaySearch()`.
 
+### Guardian enforcement
+
+`search` listens for `sdk.GuardianRegisteredTopic` via `sdk.OnBusReady` and stores the registered `sdk.Guardian` behind `guardianMu`. `Execute()` validates `query`, then calls `checkGuardian()` before parsing `max_results`, rate limiting, or making the DuckDuckGo request.
+
+Guardian requests use `sdk.GuardianActionNetwork` with metadata `{operation: "search", query: <query>}`. Allow decisions proceed; block decisions return a guardian error; unresolved approval decisions are treated as blocked.
+
 ### Testing
 
 - Mock HTTP responses for DDG scraping
