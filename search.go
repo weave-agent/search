@@ -17,15 +17,18 @@ import (
 )
 
 const (
-	paramQuery      = "query"
-	paramMaxResults = "max_results"
-	maxResultsCap   = 20
-	maxBodySize     = 10 * 1024 * 1024 // 10 MB
+	paramQuery          = "query"
+	paramMaxResults     = "max_results"
+	maxResultsCap       = 20
+	maxBodySize         = 10 * 1024 * 1024 // 10 MB
+	searchMaxAttempts   = 3
+	searchRetryDelayMax = 10 * time.Second
 )
 
 var (
-	lastSearchMu   sync.Mutex
-	lastSearchTime time.Time
+	lastSearchMu        sync.Mutex
+	lastSearchTime      time.Time
+	searchCooldownUntil time.Time
 )
 
 // SearchConfig holds per-tool settings for the search tool.
@@ -170,19 +173,29 @@ func (t *searchTool) maybeDelaySearch(ctx context.Context) error {
 	for {
 		lastSearchMu.Lock()
 		minGap := time.Duration(500+rand.IntN(1500)) * time.Millisecond
-		elapsed := time.Since(lastSearchTime)
-		if elapsed >= minGap {
-			lastSearchTime = time.Now()
+		readyAt := lastSearchTime.Add(minGap)
+		if searchCooldownUntil.After(readyAt) {
+			readyAt = searchCooldownUntil
+		}
+		now := time.Now()
+		if !now.Before(readyAt) {
+			lastSearchTime = now
 			lastSearchMu.Unlock()
 			return nil
 		}
-		remaining := minGap - elapsed
+		remaining := readyAt.Sub(now)
 		lastSearchMu.Unlock()
 
+		timer := time.NewTimer(remaining)
 		select {
-		case <-time.After(remaining):
-			// Loop back and re-check with fresh lock.
+		case <-timer.C:
 		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			return ctx.Err()
 		}
 	}
@@ -190,7 +203,45 @@ func (t *searchTool) maybeDelaySearch(ctx context.Context) error {
 
 func (t *searchTool) searchDuckDuckGo(ctx context.Context, query string, maxResults int) ([]SearchResult, error) {
 	searchURL := "https://lite.duckduckgo.com/lite/?q=" + url.QueryEscape(query)
+	var lastStatus int
 
+	for attempt := 1; attempt <= searchMaxAttempts; attempt++ {
+		resp, err := t.requestDuckDuckGo(ctx, searchURL)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			doc, err := html.Parse(io.LimitReader(resp.Body, maxBodySize))
+			resp.Body.Close()
+			if err != nil {
+				return nil, fmt.Errorf("parse html: %w", err)
+			}
+
+			return parseLiteSearchResults(doc, maxResults), nil
+		}
+
+		lastStatus = resp.StatusCode
+		delay := searchRetryDelay(resp, attempt)
+		resp.Body.Close()
+
+		if !isRetryableSearchStatus(lastStatus) {
+			return nil, fmt.Errorf("unexpected status code: %d", lastStatus)
+		}
+		if attempt == searchMaxAttempts {
+			break
+		}
+
+		recordSearchCooldown(delay)
+		if err := waitForSearchRetry(ctx, delay); err != nil {
+			return nil, err
+		}
+	}
+
+	return nil, fmt.Errorf("search provider is temporarily delaying or rate-limiting results (status %d) after %d attempts", lastStatus, searchMaxAttempts)
+}
+
+func (t *searchTool) requestDuckDuckGo(ctx context.Context, searchURL string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -204,19 +255,83 @@ func (t *searchTool) searchDuckDuckGo(ctx context.Context, query string, maxResu
 	if err != nil {
 		return nil, fmt.Errorf("http request: %w", err)
 	}
-	defer resp.Body.Close()
+	return resp, nil
+}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+func isRetryableSearchStatus(status int) bool {
+	switch status {
+	case http.StatusAccepted,
+		http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func searchRetryDelay(resp *http.Response, attempt int) time.Duration {
+	if delay, ok := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); ok {
+		return min(delay, searchRetryDelayMax)
 	}
 
-	doc, err := html.Parse(io.LimitReader(resp.Body, maxBodySize))
+	delay := time.Second << (attempt - 1)
+	jitter := time.Duration(rand.IntN(500)) * time.Millisecond
+	return min(delay+jitter, searchRetryDelayMax)
+}
+
+func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+
+	seconds, err := strconv.Atoi(value)
+	if err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second, true
+	}
+
+	retryAt, err := http.ParseTime(value)
 	if err != nil {
-		return nil, fmt.Errorf("parse html: %w", err)
+		return 0, false
+	}
+	if retryAt.Before(now) {
+		return 0, true
+	}
+	return retryAt.Sub(now), true
+}
+
+func recordSearchCooldown(delay time.Duration) {
+	if delay <= 0 {
+		return
 	}
 
-	results := parseLiteSearchResults(doc, maxResults)
-	return results, nil
+	lastSearchMu.Lock()
+	defer lastSearchMu.Unlock()
+
+	until := time.Now().Add(delay)
+	if until.After(searchCooldownUntil) {
+		searchCooldownUntil = until
+	}
+}
+
+func waitForSearchRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func randomUserAgent() string {

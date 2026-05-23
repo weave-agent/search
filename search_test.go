@@ -473,7 +473,7 @@ func TestSearchDuckDuckGo_Non200Status(t *testing.T) {
 			Transport: httpRoundTripperFunc{
 				fn: func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
-						StatusCode: http.StatusServiceUnavailable,
+						StatusCode: http.StatusForbidden,
 						Body:       io.NopCloser(strings.NewReader("")),
 					}, nil
 				},
@@ -484,11 +484,11 @@ func TestSearchDuckDuckGo_Non200Status(t *testing.T) {
 	results, err := tool.searchDuckDuckGo(context.Background(), "test", 10)
 	require.Error(t, err)
 	assert.Nil(t, results)
-	assert.Contains(t, err.Error(), "unexpected status code: 503")
+	assert.Contains(t, err.Error(), "unexpected status code: 403")
 }
 
-func TestSearchDuckDuckGo_Non200StatusCodes(t *testing.T) {
-	codes := []int{http.StatusBadRequest, http.StatusNotFound, http.StatusInternalServerError}
+func TestSearchDuckDuckGo_NonRetryableStatusCodes(t *testing.T) {
+	codes := []int{http.StatusBadRequest, http.StatusNotFound}
 	for _, code := range codes {
 		t.Run(http.StatusText(code), func(t *testing.T) {
 			tool := &searchTool{
@@ -1163,11 +1163,97 @@ func TestSearchTool_Execute_ResultsFormatting(t *testing.T) {
 	assert.Contains(t, result.Content, "\n")
 }
 
+func TestSearchDuckDuckGo_RetryableStatusThenSuccess(t *testing.T) {
+	htmlBody := `
+<!DOCTYPE html>
+<html><body>
+<table>
+<tr><td><a class="result-link" href="https://example.com">Example</a></td></tr>
+<tr><td class="result-snippet">A snippet.</td></tr>
+</table>
+</body></html>
+`
+	attempts := 0
+	tool := &searchTool{
+		httpClient: &http.Client{
+			Transport: httpRoundTripperFunc{
+				fn: func(_ *http.Request) (*http.Response, error) {
+					attempts++
+					if attempts == 1 {
+						return &http.Response{
+							StatusCode: http.StatusAccepted,
+							Header:     http.Header{"Retry-After": []string{"0"}},
+							Body:       io.NopCloser(strings.NewReader("")),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(htmlBody)),
+					}, nil
+				},
+			},
+		},
+	}
+
+	results, err := tool.searchDuckDuckGo(context.Background(), "test", 10)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, 2, attempts)
+	assert.Equal(t, "Example", results[0].Title)
+}
+
+func TestSearchDuckDuckGo_RetryableStatusExhausted(t *testing.T) {
+	attempts := 0
+	tool := &searchTool{
+		httpClient: &http.Client{
+			Transport: httpRoundTripperFunc{
+				fn: func(_ *http.Request) (*http.Response, error) {
+					attempts++
+					return &http.Response{
+						StatusCode: http.StatusAccepted,
+						Header:     http.Header{"Retry-After": []string{"0"}},
+						Body:       io.NopCloser(strings.NewReader("")),
+					}, nil
+				},
+			},
+		},
+	}
+
+	results, err := tool.searchDuckDuckGo(context.Background(), "test", 10)
+	require.Error(t, err)
+	assert.Nil(t, results)
+	assert.Equal(t, searchMaxAttempts, attempts)
+	assert.Contains(t, err.Error(), "temporarily delaying or rate-limiting")
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+
+	delay, ok := parseRetryAfter("3", now)
+	require.True(t, ok)
+	assert.Equal(t, 3*time.Second, delay)
+
+	delay, ok = parseRetryAfter(now.Add(5*time.Second).Format(http.TimeFormat), now)
+	require.True(t, ok)
+	assert.Equal(t, 5*time.Second, delay)
+
+	_, ok = parseRetryAfter("invalid", now)
+	assert.False(t, ok)
+}
+
+func TestIsRetryableSearchStatus(t *testing.T) {
+	assert.True(t, isRetryableSearchStatus(http.StatusAccepted))
+	assert.True(t, isRetryableSearchStatus(http.StatusTooManyRequests))
+	assert.True(t, isRetryableSearchStatus(http.StatusServiceUnavailable))
+	assert.False(t, isRetryableSearchStatus(http.StatusBadRequest))
+	assert.False(t, isRetryableSearchStatus(http.StatusForbidden))
+}
+
 func TestRandomUserAgent(t *testing.T) {
 	knownAgents := map[string]bool{
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36":      true,
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36":       true,
 		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36": true,
-		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36":                true,
+		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36":                 true,
 	}
 
 	ua := randomUserAgent()
@@ -1179,6 +1265,7 @@ func TestRandomUserAgent(t *testing.T) {
 func TestMaybeDelaySearch(t *testing.T) {
 	lastSearchMu.Lock()
 	lastSearchTime = time.Time{}
+	searchCooldownUntil = time.Time{}
 	lastSearchMu.Unlock()
 
 	err := (&searchTool{}).maybeDelaySearch(context.Background())
@@ -1191,6 +1278,7 @@ func TestMaybeDelaySearch(t *testing.T) {
 func TestMaybeDelaySearch_RateLimits(t *testing.T) {
 	lastSearchMu.Lock()
 	lastSearchTime = time.Now()
+	searchCooldownUntil = time.Time{}
 	lastSearchMu.Unlock()
 
 	// Verify delay executes and updates lastSearchTime without asserting wall-clock duration
@@ -1204,6 +1292,7 @@ func TestMaybeDelaySearch_RateLimits(t *testing.T) {
 func TestMaybeDelaySearch_RespectsMinGap(t *testing.T) {
 	lastSearchMu.Lock()
 	lastSearchTime = time.Time{}
+	searchCooldownUntil = time.Time{}
 	lastSearchMu.Unlock()
 
 	err := (&searchTool{}).maybeDelaySearch(context.Background())
@@ -1224,6 +1313,7 @@ func TestMaybeDelaySearch_RespectsMinGap(t *testing.T) {
 func TestMaybeDelaySearch_Concurrent(t *testing.T) {
 	lastSearchMu.Lock()
 	lastSearchTime = time.Time{}
+	searchCooldownUntil = time.Time{}
 	lastSearchMu.Unlock()
 
 	var wg sync.WaitGroup
@@ -1242,6 +1332,7 @@ func TestMaybeDelaySearch_Concurrent(t *testing.T) {
 func TestMaybeDelaySearch_ContextCancellation(t *testing.T) {
 	lastSearchMu.Lock()
 	lastSearchTime = time.Now()
+	searchCooldownUntil = time.Time{}
 	originalTime := lastSearchTime
 	lastSearchMu.Unlock()
 
