@@ -67,6 +67,161 @@ func TestCheckGuardianNoGuardian(t *testing.T) {
 	assert.Equal(t, "golang testing", req.Metadata["query"])
 }
 
+type testGuardian struct {
+	mu       sync.Mutex
+	decision sdk.GuardianDecision
+	err      error
+	requests []sdk.GuardianRequest
+}
+
+func (g *testGuardian) Decide(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+	g.mu.Lock()
+	g.requests = append(g.requests, req)
+	g.mu.Unlock()
+
+	return g.decision, g.err
+}
+
+func (g *testGuardian) Resolve(context.Context, string, sdk.GuardianResolution) error {
+	return nil
+}
+
+func (g *testGuardian) Snapshot(context.Context) (sdk.GuardianSnapshot, error) {
+	return sdk.GuardianSnapshot{}, nil
+}
+
+func (g *testGuardian) Requests() []sdk.GuardianRequest {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	return append([]sdk.GuardianRequest(nil), g.requests...)
+}
+
+func TestExecuteWithGuardian(t *testing.T) {
+	successHTML := `
+<!DOCTYPE html>
+<html><body>
+<table>
+<tr><td><a class="result-link" href="https://example.com">Example</a></td></tr>
+<tr><td class="result-snippet">A snippet.</td></tr>
+</table>
+</body></html>
+`
+
+	newTool := func(t *testing.T, requests *int) *searchTool {
+		t.Helper()
+
+		resetSearchTiming()
+
+		return &searchTool{
+			defaultMaxResults: 10,
+			httpClient: &http.Client{
+				Transport: httpRoundTripperFunc{
+					fn: func(_ *http.Request) (*http.Response, error) {
+						*requests = *requests + 1
+
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(successHTML)),
+						}, nil
+					},
+				},
+			},
+		}
+	}
+
+	withGuardian := func(t *testing.T, g sdk.Guardian) {
+		t.Helper()
+
+		origGuardian := getGuardian()
+		setGuardian(g)
+		t.Cleanup(func() { setGuardian(origGuardian) })
+	}
+
+	t.Run("allow decision permits search", func(t *testing.T) {
+		g := &testGuardian{
+			decision: sdk.GuardianDecision{
+				Action: sdk.GuardianDecisionAllow,
+			},
+		}
+		withGuardian(t, g)
+
+		httpRequests := 0
+		tool := newTool(t, &httpRequests)
+
+		result, err := tool.Execute(t.Context(), map[string]any{"query": "golang testing"})
+		require.NoError(t, err)
+		assert.False(t, result.IsError)
+		assert.Contains(t, result.Content, "1. Example")
+		assert.Equal(t, 1, httpRequests)
+
+		requests := g.Requests()
+		require.Len(t, requests, 1)
+		assert.Equal(t, sdk.GuardianActionNetwork, requests[0].Action)
+		assert.Equal(t, "search", requests[0].ToolName)
+		assert.Equal(t, "golang testing", requests[0].Metadata["query"])
+	})
+
+	t.Run("block decision returns guardian error", func(t *testing.T) {
+		g := &testGuardian{
+			decision: sdk.GuardianDecision{
+				ID:      "decision-1",
+				Action:  sdk.GuardianDecisionBlock,
+				Profile: "locked-down",
+				Reason:  "network search denied",
+			},
+		}
+		withGuardian(t, g)
+
+		httpRequests := 0
+		tool := newTool(t, &httpRequests)
+
+		result, err := tool.Execute(t.Context(), map[string]any{"query": "restricted"})
+		require.NoError(t, err)
+		assert.True(t, result.IsError)
+		assert.Contains(t, result.Content, "guardian: blocked")
+		assert.Contains(t, result.Content, "action: network")
+		assert.Contains(t, result.Content, "rule: locked-down")
+		assert.Contains(t, result.Content, "reason: network search denied")
+		assert.Equal(t, 0, httpRequests)
+
+		requests := g.Requests()
+		require.Len(t, requests, 1)
+		assert.Equal(t, "restricted", requests[0].Metadata["query"])
+	})
+
+	t.Run("missing guardian permits search", func(t *testing.T) {
+		withGuardian(t, nil)
+
+		httpRequests := 0
+		tool := newTool(t, &httpRequests)
+
+		result, err := tool.Execute(t.Context(), map[string]any{"query": "no guardian"})
+		require.NoError(t, err)
+		assert.False(t, result.IsError)
+		assert.Contains(t, result.Content, "1. Example")
+		assert.Equal(t, 1, httpRequests)
+	})
+
+	t.Run("guardian error returns tool error", func(t *testing.T) {
+		g := &testGuardian{err: errors.New("guardian unavailable")}
+		withGuardian(t, g)
+
+		httpRequests := 0
+		tool := newTool(t, &httpRequests)
+
+		result, err := tool.Execute(t.Context(), map[string]any{"query": "network check"})
+		require.NoError(t, err)
+		assert.True(t, result.IsError)
+		assert.Equal(t, "guardian: guardian unavailable", result.Content)
+		assert.Equal(t, 0, httpRequests)
+
+		requests := g.Requests()
+		require.Len(t, requests, 1)
+		assert.Equal(t, sdk.GuardianActionNetwork, requests[0].Action)
+	})
+}
+
 func TestCleanDuckDuckGoURL(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -485,6 +640,13 @@ type httpRoundTripperFunc struct {
 
 func (f httpRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f.fn(req)
+}
+
+func resetSearchTiming() {
+	lastSearchMu.Lock()
+	lastSearchTime = time.Time{}
+	searchCooldownUntil = time.Time{}
+	lastSearchMu.Unlock()
 }
 
 // errorReader is an io.Reader that always returns an error.

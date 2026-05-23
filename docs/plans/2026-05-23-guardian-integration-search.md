@@ -39,13 +39,13 @@ Add guardian policy enforcement to the `search` tool so that web search queries 
 - [x] Run search tests — must pass before next task
 
 ### Task 2: Add guardian tests to search_test.go
-- [ ] Write `TestExecuteWithGuardian` with subtests:
+- [x] Write `TestExecuteWithGuardian` with subtests:
   - "allow decision permits search"
   - "block decision returns guardian error"
   - "missing guardian permits search"
   - "guardian error returns tool error"
-- [ ] Add `testGuardian` mock helper
-- [ ] Run search tests — must pass
+- [x] Add `testGuardian` mock helper
+- [x] Run search tests — must pass
 
 ### Task 3: Verify and cleanup
 - [ ] Run `make lint` in search extension directory
