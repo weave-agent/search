@@ -3,7 +3,7 @@ module github.com/weave-agent/weave-search
 go 1.26.2
 
 require (
-	github.com/weave-agent/weave v0.0.8
+	github.com/weave-agent/weave v0.0.11
 	golang.org/x/net v0.54.0
 )
 
